@@ -83,12 +83,9 @@ async fn forward_request(
                 }
             }
 
-            let body_bytes = response.bytes().await.map_err(|e| {
-                error!("Failed to read response body: {}", e);
-                actix_web::error::ErrorInternalServerError(e)
-            })?;
+            let body_bytes = response.bytes_stream();
 
-            Ok(builder.body(body_bytes))
+            Ok(builder.streaming(body_bytes))
         }
         Err(e) => {
             error!("Forward request error: {}", e);
@@ -146,6 +143,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(domain_routes.clone()))
             .app_data(web::Data::new(client.clone()))
+            .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
             .default_service(web::to(|req: HttpRequest, body: web::Bytes, 
                                    routes: web::Data<HashMap<String, DomainConfig>>,
                                    client: web::Data<reqwest::Client>  | async move {
