@@ -65,7 +65,6 @@ RUST_LOG=info cargo run --release
 ## Limitations
 - SSL certificate paths must be correctly configured in `config.json`.
 - Requires valid certificates for all domains.
-- Error handling for invalid configurations is minimal.
 
 ## Contributing
 Contributions are welcome! Please open an issue or submit a pull request for any bugs or feature requests.
