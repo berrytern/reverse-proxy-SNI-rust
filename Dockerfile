@@ -12,9 +12,9 @@ COPY ./Cargo.toml ./Cargo.lock /app
 RUN mkdir src/ \
     && echo 'fn main() {println!("Hello, world!");}' >> ./src/main.rs \
     && cargo build --release
-RUN rm -rf ./src/ && rm -f ./target/release/deps/api_gtw*
+RUN rm -f ./src/main.rs && rm -f ./target/release/deps/api_gtw*
 
-COPY . /app
+COPY ./src/ /app/src
 # do a release build
 RUN cargo build --release && strip target/release/api-gtw
 

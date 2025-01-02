@@ -27,6 +27,7 @@ services:
       - /etc/letsencrypt/live/api1.nutespb.com.br/privkey.pem:/etc/ssl/api1.nutespb.com.br/privkey.pem:ro
       - /etc/letsencrypt/live/api1.nutespb.com.br/fullchain.pem:/etc/ssl/api1.nutespb.com.br/fullchain.pem:ro
       - /etc/letsencrypt/live/api1.nutespb.com.br/chain.pem:/etc/ssl/api1.nutespb.com.br/chain.pem:ro
+      - ./config.json:/app/config.json:ro
     networks:
       - qrz-network
       - ssm-network
