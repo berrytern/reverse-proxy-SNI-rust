@@ -105,9 +105,14 @@ async fn forward_request(
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
-    let config: String = fs::read_to_string("config.json")?;
-    let domain_routes: HashMap<String, DomainConfig> = serde_json::from_str(&config).expect("Failed to parse config.json");
-
+    let config_content: String = fs::read_to_string("config.json")?;
+    let domain_routes: HashMap<String, DomainConfig> = match serde_json::from_str(&config_content) {
+        Ok(routes) => routes,
+        Err(err) => {
+            error!("Failed to parse config.json: {}", err);
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid JSON format in config.json"));
+        }
+    };
     let default_ssl_config = SslConfig {
         key_path: "/etc/ssl/api1.nutespb.com.br/privkey.pem".into(),
         cert_path: "/etc/ssl/api1.nutespb.com.br/fullchain.pem".into(),
