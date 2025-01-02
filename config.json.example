@@ -1,0 +1,9 @@
+{
+    "example.com.br": {
+        "target": "https://example:443",
+        "ssl": {
+            "key_path": "/etc/ssl/example.com.br/privkey.pem",
+            "cert_path": "/etc/ssl/example.com.br/fullchain.pem"
+        }
+    }
+}

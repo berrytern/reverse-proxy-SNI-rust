@@ -1,0 +1,48 @@
+version: "3.8"
+services:
+  qrz-back:
+    build: ./last-running
+    container_name: qrz-back
+    restart: always
+    environment:
+      - KEY_PATH=/etc/ssl/privkey.pem
+      - CERT_PATH=/etc/ssl/fullchain.pem
+    volumes:
+      - /etc/letsencrypt/live/api1.nutespb.com.br/privkey.pem:/etc/ssl/privkey.pem:ro
+      - /etc/letsencrypt/live/api1.nutespb.com.br/fullchain.pem:/etc/ssl/fullchain.pem:ro
+    networks:
+      - qrz-network
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+  geral-api-gtw:
+    build: .
+    container_name: geral-api-gtw
+    restart: always
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - /etc/letsencrypt/live/api1.nutespb.com.br/privkey.pem:/etc/ssl/api1.nutespb.com.br/privkey.pem:ro
+      - /etc/letsencrypt/live/api1.nutespb.com.br/fullchain.pem:/etc/ssl/api1.nutespb.com.br/fullchain.pem:ro
+      - /etc/letsencrypt/live/api1.nutespb.com.br/chain.pem:/etc/ssl/api1.nutespb.com.br/chain.pem:ro
+    networks:
+      - qrz-network
+      - ssm-network
+      - aec-back-network
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+
+networks:
+  qrz-network:
+    name: qrz-network
+    driver: bridge
+  ssm-network:
+    name: ssm-network
+    external: true
+  aec-back-network:
+    name: aec-back-network
+    external: true
