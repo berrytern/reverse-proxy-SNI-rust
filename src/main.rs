@@ -96,6 +96,7 @@ async fn forward_request(
             builder.insert_header(("X-Frame-Options", "DENY"));
             builder.insert_header(("X-XSS-Protection", "1; mode=block"));
             builder.insert_header(("Referrer-Policy", "strict-origin-when-cross-origin"));
+            builder.insert_header(("X-DNS-Prefetch-Control", "off"));
             Ok(builder.streaming(body_bytes))
         }
         Err(e) => {
