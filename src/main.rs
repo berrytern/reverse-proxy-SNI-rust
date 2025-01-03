@@ -75,19 +75,27 @@ async fn forward_request(
             let mut builder = HttpResponse::build(status_code);
             
             for (key, value) in response.headers() {
-                if key != "connection" && key != "transfer-encoding" && key != "user-agent" {
-                    if let Ok(value_str) = value.to_str() {
-                        if value_str.contains('\0') || value_str.contains('\r') || value_str.contains('\n') {
-                            error!("Discarding invalid header: {} => {:?}", key, value);
-                            continue;
+                match key.as_str() {
+                    "connection" | "transfer-encoding" | "user-agent" | "server" => {
+                        continue;
+                    }
+                    key => {
+                        if let Ok(value_str) = value.to_str() {
+                            if value_str.bytes().any(|b| matches!(b, b'\0' | b'\r' | b'\n')){
+                                error!("Discarding invalid header: {} => {:?}", key, value);
+                                continue;
+                            }
+                            builder.append_header((key, value.to_str().unwrap()));
                         }
-                        builder.append_header((key.to_string(), value.to_str().unwrap()));
                     }
                 }
             }
 
             let body_bytes = response.bytes_stream();
-
+            builder.insert_header(("X-Content-Type-Options", "nosniff"));
+            builder.insert_header(("X-Frame-Options", "DENY"));
+            builder.insert_header(("X-XSS-Protection", "1; mode=block"));
+            builder.insert_header(("Referrer-Policy", "strict-origin-when-cross-origin"));
             Ok(builder.streaming(body_bytes))
         }
         Err(e) => {
