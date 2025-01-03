@@ -92,12 +92,18 @@ async fn forward_request(
             }
 
             let body_bytes = response.bytes_stream();
-            builder.insert_header(("X-Content-Type-Options", "nosniff"));
-            builder.insert_header(("X-Frame-Options", "DENY"));
-            builder.insert_header(("X-XSS-Protection", "0"));
-            builder.insert_header(("Referrer-Policy", "strict-origin-when-cross-origin"));
-            builder.insert_header(("X-DNS-Prefetch-Control", "off"));
-            builder.insert_header(("X-Download-Options", "off"));
+            builder.insert_header(("Content-Security-Policy", "default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests"))
+                .insert_header(("Cross-Origin-Resource-Policy", "same-origin"))
+                .insert_header(("Cross-Origin-Opener-Policy", "same-origin"))
+                .insert_header(("Origin-Agent-Cluster", "?1"))
+                .insert_header(("X-Content-Type-Options", "nosniff"))
+                .insert_header(("X-Frame-Options", "DENY"))
+                .insert_header(("X-XSS-Protection", "0"))
+                .insert_header(("Referrer-Policy", "no-referrer"))
+                .insert_header(("Strict-Transport-Security", "max-age=15552000; includeSubDomains"))
+                .insert_header(("X-DNS-Prefetch-Control", "off"))
+                .insert_header(("X-Download-Options", "noopen"))
+                .insert_header(("X-Permitted-Cross-Domain-Policies", "none"));
             Ok(builder.streaming(body_bytes))
         }
         Err(e) => {
