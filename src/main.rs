@@ -16,7 +16,6 @@ use env_logger;
 struct DomainConfig {
     target: String,
     ssl: SslConfig,
-    allowed_origins: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -92,7 +91,7 @@ async fn forward_request(
             }
 
             let body_bytes = response.bytes_stream();
-            builder.insert_header(("Content-Security-Policy", "default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests"))
+            builder.insert_header(("Content-Security-Policy", "default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self' 'unsafe-inline' 'unsafe-eval';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests"))
                 .insert_header(("Cross-Origin-Resource-Policy", "same-origin"))
                 .insert_header(("Cross-Origin-Opener-Policy", "same-origin"))
                 .insert_header(("Origin-Agent-Cluster", "?1"))
@@ -160,43 +159,9 @@ async fn main() -> std::io::Result<()> {
         .danger_accept_invalid_certs(true).build().expect("couldn't initialize http reqwest client");
 
     HttpServer::new(move || {
-        let cors = {
-            let domain_routes = DOMAIN_ROUTES.get().unwrap();
-            Cors::default()
-            .allowed_origin_fn(move |origin, req| {
-                if let Ok(origin) =  origin.to_str() {
-                    let headers = req.headers();
-                    let host = if let Some(host) = headers.get("Forwarded") {
-                        Some(host.to_str().unwrap().to_string())
-                    } else if let Some(host) = headers.get("X-Forwarded-Host") {
-                        Some(host.to_str().unwrap().to_string())
-                    } else if let Some(host) = headers.get("Host") {
-                        Some(host.to_str().unwrap().to_string())
-                    } else {
-                        req.uri.authority().map(|autho| autho.to_string())
-                    };
-                    if let Some(config) = domain_routes.get(&host.unwrap()){
-                        if let Some(allowed_origins) = &config.allowed_origins {
-                            if allowed_origins.contains(&origin.to_string()) {
-                                return true;
-                            }
-                        } else {
-                            return true;
-                        }
-                    }
-                }
-                
-                return false;
-            })
-            .allowed_methods(vec!["GET", "POST"])
-            .allowed_headers(vec![http::header::AUTHORIZATION, http::header::ACCEPT])
-            .allowed_header(http::header::CONTENT_TYPE)
-            .max_age(3600)
-        };
         App::new()
             .app_data(web::Data::new(client.clone()))
             .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
-            .wrap(cors)
             .default_service(web::to(
                 |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>| 
                 async move {
