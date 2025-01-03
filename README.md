@@ -18,10 +18,10 @@ This project, **api-gtw**, is an API gateway designed to provide support for mul
 1. Install Rust by following the instructions at [rust-lang.org](https://www.rust-lang.org/tools/install).
 2. Clone this repository:
    ```bash
-   git clone git@github.com:berrytern/reverse-proxy-SNI.git
-   cd reverse-proxy-SNI
+   git clone git@github.com:berrytern/reverse-proxy-SNI-rust.git
+   cd reverse-proxy-SNI-rust
    ```
-3. Build and run the project:
+3. Build the project:
    ```bash
    cargo build --release
    ```
@@ -65,7 +65,6 @@ RUST_LOG=info cargo run --release
 ## Limitations
 - SSL certificate paths must be correctly configured in `config.json`.
 - Requires valid certificates for all domains.
-- Error handling for invalid configurations is minimal.
 
 ## Contributing
 Contributions are welcome! Please open an issue or submit a pull request for any bugs or feature requests.

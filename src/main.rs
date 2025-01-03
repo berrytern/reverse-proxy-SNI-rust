@@ -1,10 +1,12 @@
-use actix_web::{web, App, HttpServer, HttpRequest, HttpResponse};
-use openssl::ssl::SslContext;
-use reqwest::header::HeaderName as ReqwestHeaderName;
-use reqwest::header::HeaderValue as ReqwestHeaderValue;
-use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
+use actix_web::{http, web, App, HttpRequest, HttpResponse, HttpServer};
+use actix_cors::Cors;
+use reqwest::header::{
+    HeaderName as ReqwestHeaderName,
+    HeaderValue as ReqwestHeaderValue
+};
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod, SslContext};
 use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
+use std::{collections::HashMap,sync::OnceLock};
 use reqwest::Client;
 use std::fs;
 use log::error;
@@ -72,23 +74,36 @@ async fn forward_request(
             let mut builder = HttpResponse::build(status_code);
             
             for (key, value) in response.headers() {
-                if key != "connection" && key != "transfer-encoding" && key != "user-agent" {
-                    if let Ok(value_str) = value.to_str() {
-                        if value_str.contains('\0') || value_str.contains('\r') || value_str.contains('\n') {
-                            error!("Discarding invalid header: {} => {:?}", key, value);
-                            continue;
+                match key.as_str() {
+                    "connection" | "transfer-encoding" | "user-agent" | "server" | "x-powered-by" => {
+                        continue;
+                    }
+                    key => {
+                        if let Ok(value_str) = value.to_str() {
+                            if value_str.bytes().any(|b| matches!(b, b'\0' | b'\r' | b'\n')){
+                                error!("Discarding invalid header: {} => {:?}", key, value);
+                                continue;
+                            }
+                            builder.append_header((key, value.to_str().unwrap()));
                         }
-                        builder.append_header((key.to_string(), value.to_str().unwrap()));
                     }
                 }
             }
 
-            let body_bytes = response.bytes().await.map_err(|e| {
-                error!("Failed to read response body: {}", e);
-                actix_web::error::ErrorInternalServerError(e)
-            })?;
-
-            Ok(builder.body(body_bytes))
+            let body_bytes = response.bytes_stream();
+            builder.insert_header(("Content-Security-Policy", "default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self' 'unsafe-inline' 'unsafe-eval';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests"))
+                .insert_header(("Cross-Origin-Resource-Policy", "same-origin"))
+                .insert_header(("Cross-Origin-Opener-Policy", "same-origin"))
+                .insert_header(("Origin-Agent-Cluster", "?1"))
+                .insert_header(("X-Content-Type-Options", "nosniff"))
+                .insert_header(("X-Frame-Options", "DENY"))
+                .insert_header(("X-XSS-Protection", "0"))
+                .insert_header(("Referrer-Policy", "no-referrer"))
+                .insert_header(("Strict-Transport-Security", "max-age=15552000; includeSubDomains"))
+                .insert_header(("X-DNS-Prefetch-Control", "off"))
+                .insert_header(("X-Download-Options", "noopen"))
+                .insert_header(("X-Permitted-Cross-Domain-Policies", "none"));
+            Ok(builder.streaming(body_bytes))
         }
         Err(e) => {
             error!("Forward request error: {}", e);
@@ -102,17 +117,19 @@ async fn forward_request(
     }
 }
 
+static DOMAIN_ROUTES: OnceLock<HashMap<String, DomainConfig>> = OnceLock::new();
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
     let config_content: String = fs::read_to_string("config.json")?;
-    let domain_routes: HashMap<String, DomainConfig> = match serde_json::from_str(&config_content) {
+    DOMAIN_ROUTES.set(match serde_json::from_str(&config_content) {
         Ok(routes) => routes,
         Err(err) => {
             error!("Failed to parse config.json: {}", err);
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid JSON format in config.json"));
         }
-    };
+    }).expect("Failed to set domain routes");
     let default_ssl_config = SslConfig {
         key_path: "/etc/ssl/api1.nutespb.com.br/privkey.pem".into(),
         cert_path: "/etc/ssl/api1.nutespb.com.br/fullchain.pem".into(),
@@ -122,10 +139,9 @@ async fn main() -> std::io::Result<()> {
     builder.set_private_key_file(&default_ssl_config.key_path, SslFiletype::PEM).unwrap();
     builder.set_certificate_chain_file(&default_ssl_config.cert_path).unwrap();
     // Set SNI callback
-    let domain_routes_clone = domain_routes.clone();
     builder.set_servername_callback(move |ssl, _| {
         if let Some(server_name) = ssl.servername(openssl::ssl::NameType::HOST_NAME){
-            if let Some(config) = domain_routes_clone.get(server_name) {
+            if let Some(config) = DOMAIN_ROUTES.get().unwrap().get(server_name) {
     
                 let mut context = SslContext::builder(SslMethod::tls()).unwrap();
                 context.set_private_key_file(&config.ssl.key_path, SslFiletype::PEM).unwrap();
@@ -134,34 +150,35 @@ async fn main() -> std::io::Result<()> {
                 ssl.set_ssl_context(&context.build()).unwrap();
             }
         }
-        
+
         Ok(())
     });
 
     let client = Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .danger_accept_invalid_certs(true).build().expect("couldn't initialize http reqwest client");
+        .redirect(reqwest::redirect::Policy::none())
+        .danger_accept_invalid_certs(true).build().expect("couldn't initialize http reqwest client");
 
     HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(domain_routes.clone()))
             .app_data(web::Data::new(client.clone()))
-            .default_service(web::to(|req: HttpRequest, body: web::Bytes, 
-                                   routes: web::Data<HashMap<String, DomainConfig>>,
-                                   client: web::Data<reqwest::Client>  | async move {
+            .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
+            .default_service(web::to(
+                |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>| 
+                async move {
                 
-                let host = req.connection_info().host().to_string();
-                
-                if let Some(config) = routes.get(&host) {
-                    forward_request(req, body, config.target.clone(), client).await
-                } else {
-                    Ok(HttpResponse::NotFound().json(ErrorResponse {
-                        error: "Domain not configured".into(),
-                        details: None,
-                        code: None,
-                    }))
+                    let host = req.connection_info().host().to_string();
+                    
+                    if let Some(config) = DOMAIN_ROUTES.get().unwrap().get(&host) {
+                        forward_request(req, body, config.target.clone(), client).await
+                    } else {
+                        Ok(HttpResponse::NotFound().json(ErrorResponse {
+                            error: "Domain not configured".into(),
+                            details: None,
+                            code: None,
+                        }))
+                    }
                 }
-            }))
+            ))
     })
     .bind_openssl("0.0.0.0:443", builder)?
     .run()

@@ -7,10 +7,16 @@ RUN apk add --no-cache musl-dev pkgconfig openssl-dev
 # set the workdir and copy the source into it
 WORKDIR /app
 
-COPY ./ /app
+COPY ./Cargo.toml ./Cargo.lock /app
+
+RUN mkdir src/ \
+    && echo 'fn main() {println!("Hello, world!");}' >> ./src/main.rs \
+    && cargo build --release
+RUN rm -f ./src/main.rs && rm -f ./target/release/deps/api_gtw*
+
+COPY ./src/ /app/src
 # do a release build
-RUN cargo build --release
-RUN strip target/release/api-gtw
+RUN cargo build --release && strip target/release/api-gtw
 
 # use a plain alpine image, the alpine version needs to match the builder
 FROM alpine:3.20
