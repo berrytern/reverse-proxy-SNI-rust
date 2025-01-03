@@ -76,7 +76,7 @@ async fn forward_request(
             
             for (key, value) in response.headers() {
                 match key.as_str() {
-                    "connection" | "transfer-encoding" | "user-agent" | "server" => {
+                    "connection" | "transfer-encoding" | "user-agent" | "server" | "x-powered-by" => {
                         continue;
                     }
                     key => {
@@ -94,9 +94,10 @@ async fn forward_request(
             let body_bytes = response.bytes_stream();
             builder.insert_header(("X-Content-Type-Options", "nosniff"));
             builder.insert_header(("X-Frame-Options", "DENY"));
-            builder.insert_header(("X-XSS-Protection", "1; mode=block"));
+            builder.insert_header(("X-XSS-Protection", "0"));
             builder.insert_header(("Referrer-Policy", "strict-origin-when-cross-origin"));
             builder.insert_header(("X-DNS-Prefetch-Control", "off"));
+            builder.insert_header(("X-Download-Options", "off"));
             Ok(builder.streaming(body_bytes))
         }
         Err(e) => {
