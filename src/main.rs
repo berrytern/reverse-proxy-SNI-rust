@@ -1,5 +1,7 @@
-use actix_web::{http, web, App, HttpRequest, HttpResponse, HttpServer};
-use actix_cors::Cors;
+//mod config;
+//mod infrastructure;
+// use infrastructure::yaml::load_config::load_config;
+use actix_web::{web, App, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer};
 use reqwest::header::{
     HeaderName as ReqwestHeaderName,
     HeaderValue as ReqwestHeaderValue
@@ -16,6 +18,8 @@ use env_logger;
 struct DomainConfig {
     target: String,
     ssl: SslConfig,
+    cross_origin_resource_policy: Option<String>,
+    content_security_policy: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -31,11 +35,34 @@ struct ErrorResponse {
     code: Option<String>,
 }
 
+const DEFAULT_SECURITY_HEADERS: [(&'static str,&'static str); 12] = [
+    ("Content-Security-Policy", "default-src 'self';connect-src 'self';base-uri;font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https:;upgrade-insecure-requests"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+    ("Origin-Agent-Cluster", "?1"),
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("X-XSS-Protection", "0"),
+    ("Referrer-Policy", "no-referrer"),
+    ("Strict-Transport-Security", "max-age=15552000; includeSubDomains"),
+    ("X-DNS-Prefetch-Control", "off"),
+    ("X-Download-Options", "noopen"),
+    ("X-Permitted-Cross-Domain-Policies", "none"),
+];
+
+fn set_headers_from_config(hostname: &str, builder: &mut HttpResponseBuilder){
+    if let Some(config) = DOMAIN_ROUTES.get().unwrap().get(hostname) {
+        config.cross_origin_resource_policy.as_ref().map(|value| builder.insert_header(("Cross-Origin-Resource-Policy", value.to_string())));
+        config.content_security_policy.as_ref().map(|value| builder.insert_header(("Content-Security-Policy", value.to_string())));                        
+    }
+}
+
 async fn forward_request(
     req: HttpRequest,
     body: web::Bytes,
     target_url: String,
     client: web::Data<reqwest::Client>,
+    hostname: &str,
 ) -> Result<HttpResponse, actix_web::Error> {
     let url = format!("{}{}", target_url, req.uri().path_and_query().map_or("", |x| x.as_str()));
     
@@ -91,18 +118,10 @@ async fn forward_request(
             }
 
             let body_bytes = response.bytes_stream();
-            builder.insert_header(("Content-Security-Policy", "default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self' 'unsafe-inline' 'unsafe-eval';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests"))
-                .insert_header(("Cross-Origin-Resource-Policy", "same-origin"))
-                .insert_header(("Cross-Origin-Opener-Policy", "same-origin"))
-                .insert_header(("Origin-Agent-Cluster", "?1"))
-                .insert_header(("X-Content-Type-Options", "nosniff"))
-                .insert_header(("X-Frame-Options", "DENY"))
-                .insert_header(("X-XSS-Protection", "0"))
-                .insert_header(("Referrer-Policy", "no-referrer"))
-                .insert_header(("Strict-Transport-Security", "max-age=15552000; includeSubDomains"))
-                .insert_header(("X-DNS-Prefetch-Control", "off"))
-                .insert_header(("X-Download-Options", "noopen"))
-                .insert_header(("X-Permitted-Cross-Domain-Policies", "none"));
+            for (name, value) in DEFAULT_SECURITY_HEADERS {
+                builder.insert_header((name, value));
+            }
+            set_headers_from_config(hostname, &mut builder);
             Ok(builder.streaming(body_bytes))
         }
         Err(e) => {
@@ -122,6 +141,7 @@ static DOMAIN_ROUTES: OnceLock<HashMap<String, DomainConfig>> = OnceLock::new();
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
+    // let config = load_config("config.yaml");
     let config_content: String = fs::read_to_string("config.json")?;
     DOMAIN_ROUTES.set(match serde_json::from_str(&config_content) {
         Ok(routes) => routes,
@@ -165,11 +185,10 @@ async fn main() -> std::io::Result<()> {
             .default_service(web::to(
                 |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>| 
                 async move {
-                
                     let host = req.connection_info().host().to_string();
                     
                     if let Some(config) = DOMAIN_ROUTES.get().unwrap().get(&host) {
-                        forward_request(req, body, config.target.clone(), client).await
+                        forward_request(req, body, config.target.clone(), client, &host).await
                     } else {
                         Ok(HttpResponse::NotFound().json(ErrorResponse {
                             error: "Domain not configured".into(),

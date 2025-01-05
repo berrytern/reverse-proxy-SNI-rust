@@ -24,7 +24,6 @@ FROM alpine:3.20
 RUN apk add --no-cache libgcc openssl-dev
 # copy the binary into the final image
 COPY --from=0 /app/target/release/api-gtw .
-COPY ./config.json .
 EXPOSE 443
 EXPOSE 80
 # set the binary as entrypoint
