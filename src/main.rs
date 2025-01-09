@@ -67,9 +67,19 @@ async fn handler_request(request_action: &RequestAction, req: &HttpRequest, body
     for policy in &request_action.policies {
         match policy {
             PolicyHandler::Log { policy } => {
+                if let Some(condiction) = &policy.log.condition {
+                    if !condiction.proceed(req) {
+                        continue;
+                    }
+                }
                 policy.run(&req);
             },
             PolicyHandler::Proxy { policy, target, count, size } => {
+                if let Some(condiction) = &policy.proxy.condition {
+                    if !condiction.proceed(req) {
+                        continue;
+                    }
+                }
                 match target {
                     URLType::Vec(urls) => {
                         let mut count_value = count.lock().unwrap();
@@ -107,6 +117,11 @@ async fn handler_request(request_action: &RequestAction, req: &HttpRequest, body
                 }
             },
             PolicyHandler::Header { policy } => {
+                if let Some(condiction) = &policy.header.condition {
+                    if !condiction.proceed(req) {
+                        continue;
+                    }
+                }
                 policy.run(&mut gateway_response);
             },
         }

@@ -181,7 +181,7 @@ pub enum Condition {
 }
 
 impl Condition {
-    pub fn proceed(&self, req: HttpRequest) -> bool {
+    pub fn proceed(&self, req: &HttpRequest) -> bool {
         match self {
             Condition::PathExact { path } => {
                 req.uri().path() == path
