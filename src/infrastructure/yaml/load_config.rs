@@ -59,9 +59,9 @@ pub fn load_config(file_path: &str) -> Config {
             }
             expand_var(&mut data);
             return match serde_yaml::from_str(&data) {
-                Ok(cf) => {
+                Ok(fc) => {
                     let mut errors: Vec<String> = vec![];
-                    validate_https(&cf, &mut errors);
+                    validate_https(&fc, &mut errors);
                     if errors.len() > 0 {
                         println!("Errors found in configuration file:");
                         for error in errors {
@@ -69,7 +69,7 @@ pub fn load_config(file_path: &str) -> Config {
                         }
                         exit(0);
                     }
-                    cf
+                    fc
                 },
                 Err(err) => {
                     println!("Invalid YAML or cannot be converted to Config.{}", err);

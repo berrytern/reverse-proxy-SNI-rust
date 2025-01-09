@@ -1,9 +1,8 @@
 use std::{collections::HashMap, sync::{Arc,Mutex}};
 use crate::config::{
-    config::{
-    Config, Endpoint, EndpointType, HeaderPolicy, LogPolicy, PathType, Policies, ProxyPolicy, Service, URLType},
-    handlers::{HostnameHandler, SpecificHostnameHandler, PathHandler, RequestAction}
-
+    config::{Config, Endpoint, EndpointType, PathType, Service, URLType},
+    handlers::{HostnameHandler, SpecificHostnameHandler, PathHandler, RequestAction},
+    policies::{Policies, LogPolicy, ProxyPolicy, HeaderPolicy}
 };
 
 fn feed_path_host(path_handler: &mut PathHandler, host: &String, methods: &Option<Vec<String>>, policies: &Vec<PolicyHandler>) {
