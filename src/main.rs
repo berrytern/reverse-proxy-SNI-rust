@@ -1,11 +1,11 @@
 mod config;
 mod infrastructure;
-use config::{config::{Config, URLType}, handlers::HostHandler};
+use config::{config::{Config, URLType}, handlers::{HostHandler, PathHandler, RequestAction}};
 use infrastructure::yaml::{load_config::load_config, load_handlers::{register_handlers, PolicyHandler}};
 use actix_web::{http::StatusCode, web, App, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer};
 use openssl::ssl::{SslAcceptor, SslContext, SslFiletype, SslMethod};
 use serde::{Serialize, Deserialize};
-use std::{collections::HashMap, sync::OnceLock};
+use std::{collections::HashMap, path, sync::OnceLock};
 use reqwest::{Client, Response};
 use env_logger;
 
@@ -38,7 +38,8 @@ const DEFAULT_SECURITY_HEADERS: [(&'static str,&'static str); 12] = [
 ];
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
-static HANDLERS: OnceLock<HashMap<String, HostHandler>> = OnceLock::new();
+static HOST_HANDLERS: OnceLock<HashMap<String, HostHandler>> = OnceLock::new();
+static PATH_HANDLERS: OnceLock<HashMap<String, PathHandler>> = OnceLock::new();
 
 fn add_response_headers(gateway_response: &mut HttpResponseBuilder, response: &Response){
     for (key, value) in response.headers() {
@@ -57,14 +58,75 @@ fn add_response_headers(gateway_response: &mut HttpResponseBuilder, response: &R
         }
     }
 }
+async fn handler_request(request_action: &RequestAction, req: &HttpRequest, body: web::Bytes, client: &web::Data<reqwest::Client>) -> HttpResponse {
+    let mut gateway_response = HttpResponseBuilder::new(StatusCode::OK);
+    let mut gateway_response_body = None;
+    for (name, value) in DEFAULT_SECURITY_HEADERS {
+        gateway_response.insert_header((name, value));
+    }
+    for policy in &request_action.policies {
+        match policy {
+            PolicyHandler::Log { policy } => {
+                policy.run(&req);
+            },
+            PolicyHandler::Proxy { policy, target, count, size } => {
+                match target {
+                    URLType::Vec(urls) => {
+                        let mut count_value = count.lock().unwrap();
+                        let index = *count_value;
+                        if urls.len() > 1 {
+                            if index < *size {
+                                *count_value += 1;
+                            } else {
+                                *count_value = 0;
+                            }
+                        }
+                        drop(count_value);
+                        if let Ok(response) = policy.run(&req, &format!("{}{}", urls[index as usize].as_str(), &req.uri().path_and_query().map_or("/", |x| x.as_str())), body.to_vec(), &client).await{
+                            let status_code = actix_web::http::StatusCode::from_u16(response.status().as_u16())
+                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
+                            
+                            add_response_headers(&mut gateway_response, &response);
+                            gateway_response.status(status_code);
+                            gateway_response_body = Some(response.bytes_stream());
+                        } else {
+                            gateway_response.status(StatusCode::BAD_GATEWAY).body("Bad Gateway");
+                        }
+                    },
+                    URLType::String(url) => {
+                        if let Ok(response) = policy.run(&req, &format!("{}{}", &url.to_string(), &req.uri().path_and_query().map_or("/", |x| x.as_str())), body.to_vec(), &client).await{
+                            let status_code = actix_web::http::StatusCode::from_u16(response.status().as_u16())
+                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
+                            add_response_headers(&mut gateway_response, &response);
+                            gateway_response.status(status_code);
+                            gateway_response_body = Some(response.bytes_stream());
+                        } else {
+                            gateway_response.status(StatusCode::BAD_GATEWAY).body("Bad Gateway");
+                        }
+                    }
+                }
+            },
+            PolicyHandler::Header { policy } => {
+                policy.run(&mut gateway_response);
+            },
+        }
+    }
+    if let Some(body) = gateway_response_body {
+        return gateway_response.streaming(body);
+    } else {
+        return gateway_response.finish();
+    }
+}
+
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
     let config = load_config("config.yaml");
-    let handlers = register_handlers(&config);
+    let (host_handlers, path_handlers) = register_handlers(&config);
     CONFIG.set(config).expect("Failed to set config");
-    HANDLERS.set(handlers).expect("Failed to set handlers");
+    HOST_HANDLERS.set(host_handlers).expect("Failed to set host handlers");
+    PATH_HANDLERS.set(path_handlers).expect("Failed to set path handlers");
     let default_ssl_config = SslConfig {
         key_path: "/etc/ssl/api1.nutespb.com.br/privkey.pem".into(),
         cert_path: "/etc/ssl/api1.nutespb.com.br/fullchain.pem".into(),
@@ -113,151 +175,73 @@ async fn main() -> std::io::Result<()> {
             Ok(())
         });
         let _ = HttpServer::new(move || {
-            let app = App::new();
-            app
+            let mut app = App::new();
+            let paths = vec!["/".to_string(), "/{tail}".to_string()];
+            app = app
                 .app_data(web::Data::new(https_client.clone()))
-                .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
-                .default_service(web::to(
-                    |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>|
-                    async move {
-                        let host: String = req.connection_info().host().to_string();
-                        let handlers = HANDLERS.get().unwrap();
-                        if let Some(host_handler) = handlers.get(&host) {
-                            if let Some(request_action) = host_handler.paths.get(req.uri().path()) {
-                                if request_action.methods.len() == 0 || request_action.methods.contains(&req.method().to_string()) {
-                                    let mut gateway_response = HttpResponseBuilder::new(StatusCode::OK);
-                                    let mut gateway_response_body = None;
-                                    for (name, value) in DEFAULT_SECURITY_HEADERS {
-                                        gateway_response.insert_header((name, value));
+                .app_data(web::PayloadConfig::new(10 * 1024 * 1024));
+            for path in paths {
+                app = app
+                    .route(&path, web::to(
+                        |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>| {
+                        async move {
+                            let path = req.match_pattern().unwrap();
+                            if let Some(path_handler) = PATH_HANDLERS.get().unwrap().get(&path){
+                                let host: String = req.connection_info().host().to_string();
+                                let method = req.method().to_string();
+                                return match (path_handler.hosts.get(&host), &path_handler.action) {
+                                    (Some(request_action), _) if request_action.methods.is_empty() || request_action.methods.contains(&method.to_string()) => {
+                                        handler_request(request_action, &req, body, &client).await
+                                    },
+                                    (None, Some(request_action)) if request_action.methods.is_empty() || request_action.methods.contains(&method.to_string()) => {
+                                        handler_request(request_action, &req, body, &client).await
+                                    },
+                                    (_, _) => {
+                                        HttpResponse::Ok().json(ErrorResponse {
+                                            error: "path not configured".into(),
+                                            details: None,
+                                            code: None,
+                                        })
                                     }
-                                    for policy in &request_action.policies {
-                                        match policy {
-                                            PolicyHandler::Log { policy } => {
-                                                policy.run(&req);
-                                            },
-                                            PolicyHandler::Proxy { policy, target, count, size } => {
-                                                match target {
-                                                    URLType::Vec(urls) => {
-                                                        let mut count_value = count.lock().unwrap();
-                                                        let index = *count_value;
-                                                        if urls.len() > 1 {
-                                                            if index < *size {
-                                                                *count_value += 1;
-                                                            } else {
-                                                                *count_value = 0;
-                                                            }
-                                                        }
-                                                        drop(count_value);
-                                                        if let Ok(response) = policy.run(&req, &format!("{}{}", urls[index as usize].as_str(), &req.uri().path_and_query().map_or("/", |x| x.as_str())), body.to_vec(), &client).await{
-                                                            let status_code = actix_web::http::StatusCode::from_u16(response.status().as_u16())
-                                                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
-                                                            
-                                                            add_response_headers(&mut gateway_response, &response);
-                                                            gateway_response.status(status_code);
-                                                            gateway_response_body = Some(response.bytes_stream());
-                                                        } else {
-                                                            gateway_response.status(StatusCode::BAD_GATEWAY).body("Bad Gateway");
-                                                        }
-                                                    },
-                                                    URLType::String(url) => {
-                                                        if let Ok(response) = policy.run(&req, &format!("{}{}", &url.to_string(), &req.uri().path_and_query().map_or("/", |x| x.as_str())), body.to_vec(), &client).await{
-                                                            let status_code = actix_web::http::StatusCode::from_u16(response.status().as_u16())
-                                                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
-                                                            add_response_headers(&mut gateway_response, &response);
-                                                            gateway_response.status(status_code);
-                                                            gateway_response_body = Some(response.bytes_stream());
-                                                        } else {
-                                                            gateway_response.status(StatusCode::BAD_GATEWAY).body("Bad Gateway");
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                            PolicyHandler::Header { policy } => {
-                                                policy.run(&mut gateway_response);
-                                            },
-                                        }
-                                    }
-                                    if let Some(body) = gateway_response_body {
-                                        return gateway_response.streaming(body);
-                                    } else {
-                                        return gateway_response.finish();
-                                    }
-                                }
-                            } else if let Some(request_action) = &host_handler.action {
-                                if request_action.methods.len() == 0 || request_action.methods.contains(&req.method().to_string()) {
-                                    let mut gateway_response = HttpResponseBuilder::new(StatusCode::OK);
-                                    let mut gateway_response_body = None;
-                                    for (name, value) in DEFAULT_SECURITY_HEADERS {
-                                        gateway_response.insert_header((name, value));
-                                    }
-                                    for policy in &request_action.policies {
-                                        match policy {
-                                            PolicyHandler::Log { policy } => {
-                                                policy.run(&req);
-                                            },
-                                            PolicyHandler::Proxy { policy, target, count, size } => {
-                                                match target {
-                                                    URLType::Vec(urls) => {
-                                                        let mut count_value = count.lock().unwrap();
-                                                        let index = *count_value;
-                                                        if urls.len() > 1 {
-                                                            if index < *size {
-                                                                *count_value += 1;
-                                                            } else {
-                                                                *count_value = 0;
-                                                            }
-                                                        }
-                                                        drop(count_value);
-                                                        if let Ok(response) = policy.run(&req, &format!("{}{}", urls[index as usize].as_str(), &req.uri().path_and_query().map_or("/", |x| x.as_str())), body.to_vec(), &client).await{
-                                                            let status_code = actix_web::http::StatusCode::from_u16(response.status().as_u16())
-                                                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
-                                                            
-                                                            add_response_headers(&mut gateway_response, &response);
-                                                            gateway_response_body = Some(response.bytes_stream());
-                                                            gateway_response.status(status_code);
-                                                        } else {
-                                                            gateway_response.status(StatusCode::BAD_GATEWAY).body("Bad Gateway");
-                                                        }
-                                                    },
-                                                    URLType::String(url) => {
-                                                        if let Ok(response) = policy.run(&req, &format!("{}{}", &url.to_string(), &req.uri().path_and_query().map_or("/", |x| x.as_str())), body.to_vec(), &client).await{
-                                                            let status_code = actix_web::http::StatusCode::from_u16(response.status().as_u16())
-                                                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
-                                                            
-                                                            add_response_headers(&mut gateway_response, &response);
-                                                            gateway_response_body = Some(response.bytes_stream());
-                                                            gateway_response.status(status_code);
-                                                        } else {
-                                                            gateway_response.status(StatusCode::BAD_GATEWAY).body("Bad Gateway");
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                            PolicyHandler::Header { policy } => {
-                                                policy.run(&mut gateway_response);
-                                            },
-                                        }
-                                    }
-                                    if let Some(body) = gateway_response_body {
-                                        return gateway_response.streaming(body);
-                                    } else {
-                                        return gateway_response.finish();
-                                    }
-                                }
+                                };
+                            }else{
+                                HttpResponse::Ok().json(ErrorResponse {
+                                    error: "path not configured".into(),
+                                    details: None,
+                                    code: None,
+                                })
+                            }                            
+                        }
+                    }));
+            }
+            app.default_service(web::to(
+                |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>|
+                async move {
+                    let host: String = req.connection_info().host().to_string();
+                    let handlers = HOST_HANDLERS.get().unwrap();
+                    if let Some(host_handler) = handlers.get(&host) {
+                        if let Some(request_action) = host_handler.paths.get(req.uri().path()) {
+                            if request_action.methods.len() == 0 || request_action.methods.contains(&req.method().to_string()) {
+                                return handler_request(request_action, &req, body, &client).await;
                             }
-                            return HttpResponse::NotFound().json(ErrorResponse {
-                                error: "Method not configured".into(),
-                                details: None,
-                                code: None,
-                            });
+                        } else if let Some(request_action) = &host_handler.action {
+                            if request_action.methods.len() == 0 || request_action.methods.contains(&req.method().to_string()) {
+                                return handler_request(request_action, &req, body, &client).await;
+                            }
                         }
                         return HttpResponse::NotFound().json(ErrorResponse {
-                            error: "Hostname not configured".into(),
+                            error: "Method not configured".into(),
                             details: None,
                             code: None,
                         });
                     }
-                ))
+                    return HttpResponse::NotFound().json(ErrorResponse {
+                        error: "Hostname not configured".into(),
+                        details: None,
+                        code: None,
+                    });
+                }
+            ))
         }).bind_openssl((https.hostname.clone(), https.port), builder)?.run().await?;
     }
     Ok(())

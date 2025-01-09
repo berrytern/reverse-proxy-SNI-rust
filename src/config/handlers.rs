@@ -6,6 +6,11 @@ pub struct HostHandler {
     pub paths: HashMap<String, RequestAction>,
     pub action: Option<RequestAction>,
 }
+#[derive(Debug)]
+pub struct PathHandler {
+    pub hosts: HashMap<String, RequestAction>,
+    pub action: Option<RequestAction>,
+}
 
 #[derive(Debug)]
 pub struct RequestAction {
