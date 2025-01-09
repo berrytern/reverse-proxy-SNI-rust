@@ -1,11 +1,11 @@
 mod config;
 mod infrastructure;
-use config::{config::{Config, URLType}, handlers::{HostHandler, PathHandler, RequestAction}};
+use config::{config::{Config, URLType}, handlers::{HostnameHandler, PathHandler, RequestAction}};
 use infrastructure::yaml::{load_config::load_config, load_handlers::{register_handlers, PolicyHandler}};
 use actix_web::{http::StatusCode, web, App, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer};
 use openssl::ssl::{SslAcceptor, SslContext, SslFiletype, SslMethod};
 use serde::{Serialize, Deserialize};
-use std::{collections::HashMap, path, sync::OnceLock};
+use std::{collections::HashMap, sync::OnceLock};
 use reqwest::{Client, Response};
 use env_logger;
 
@@ -38,7 +38,7 @@ const DEFAULT_SECURITY_HEADERS: [(&'static str,&'static str); 12] = [
 ];
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
-static HOST_HANDLERS: OnceLock<HashMap<String, HostHandler>> = OnceLock::new();
+static HOST_HANDLERS: OnceLock<HostnameHandler> = OnceLock::new();
 static PATH_HANDLERS: OnceLock<HashMap<String, PathHandler>> = OnceLock::new();
 
 fn add_response_headers(gateway_response: &mut HttpResponseBuilder, response: &Response){
@@ -123,9 +123,9 @@ async fn handler_request(request_action: &RequestAction, req: &HttpRequest, body
 async fn main() -> std::io::Result<()> {
     env_logger::init();
     let config = load_config("config.yaml");
-    let (host_handlers, path_handlers) = register_handlers(&config);
+    let (hostname_handlers, path_handlers) = register_handlers(&config);
     CONFIG.set(config).expect("Failed to set config");
-    HOST_HANDLERS.set(host_handlers).expect("Failed to set host handlers");
+    HOST_HANDLERS.set(hostname_handlers).expect("Failed to set host handlers");
     PATH_HANDLERS.set(path_handlers).expect("Failed to set path handlers");
     let default_ssl_config = SslConfig {
         key_path: "/etc/ssl/api1.nutespb.com.br/privkey.pem".into(),
@@ -176,7 +176,7 @@ async fn main() -> std::io::Result<()> {
         });
         let _ = HttpServer::new(move || {
             let mut app = App::new();
-            let paths = vec!["/".to_string(), "/{tail}".to_string()];
+            let paths = PATH_HANDLERS.get().unwrap().keys();
             app = app
                 .app_data(web::Data::new(https_client.clone()))
                 .app_data(web::PayloadConfig::new(10 * 1024 * 1024));
@@ -186,7 +186,8 @@ async fn main() -> std::io::Result<()> {
                         |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>| {
                         async move {
                             let path = req.match_pattern().unwrap();
-                            if let Some(path_handler) = PATH_HANDLERS.get().unwrap().get(&path){
+                            let handlers = PATH_HANDLERS.get().unwrap();
+                            if let Some(path_handler) = handlers.get(&path){
                                 let host: String = req.connection_info().host().to_string();
                                 let method = req.method().to_string();
                                 return match (path_handler.hosts.get(&host), &path_handler.action) {
@@ -218,22 +219,20 @@ async fn main() -> std::io::Result<()> {
                 |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>|
                 async move {
                     let host: String = req.connection_info().host().to_string();
-                    let handlers = HOST_HANDLERS.get().unwrap();
-                    if let Some(host_handler) = handlers.get(&host) {
-                        if let Some(request_action) = host_handler.paths.get(req.uri().path()) {
-                            if request_action.methods.len() == 0 || request_action.methods.contains(&req.method().to_string()) {
-                                return handler_request(request_action, &req, body, &client).await;
-                            }
-                        } else if let Some(request_action) = &host_handler.action {
-                            if request_action.methods.len() == 0 || request_action.methods.contains(&req.method().to_string()) {
-                                return handler_request(request_action, &req, body, &client).await;
-                            }
+                    let hostname_handlers = HOST_HANDLERS.get().unwrap();
+                    if let Some(host_handler) = hostname_handlers.hosts.get(&host) {
+                        if host_handler.action.methods.len() == 0 || host_handler.action.methods.contains(&req.method().to_string()) {
+                            return handler_request(&host_handler.action, &req, body, &client).await;
                         }
                         return HttpResponse::NotFound().json(ErrorResponse {
                             error: "Method not configured".into(),
                             details: None,
                             code: None,
                         });
+                    } else if let Some(request_action) = &hostname_handlers.action {
+                        if request_action.methods.len() == 0 || request_action.methods.contains(&req.method().to_string()) {
+                            return handler_request(request_action, &req, body, &client).await;
+                        }
                     }
                     return HttpResponse::NotFound().json(ErrorResponse {
                         error: "Hostname not configured".into(),
