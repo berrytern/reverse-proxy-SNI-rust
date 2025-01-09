@@ -109,11 +109,11 @@ fn process_endpoint(policies: &Vec<PolicyHandler>, endpoint: &Endpoint, host_han
                 feed_host_handler(host_handler, &endpoint.host, path, &endpoint.methods, policies);
                 match path_host.get_mut(path){
                     Some(path_handler) => {
-                        feed_path_host(path_handler, path, &endpoint.methods, policies);
+                        feed_path_host(path_handler, &endpoint.host, &endpoint.methods, policies);
                     }
                     None => {
                         let mut path_handler = PathHandler{hosts: HashMap::new(), action: None};
-                        feed_path_host(&mut path_handler, path, &endpoint.methods, policies);
+                        feed_path_host(&mut path_handler, &endpoint.host, &endpoint.methods, policies);
                         path_host.insert(path.clone(), path_handler);
                     },
                 }
@@ -123,11 +123,11 @@ fn process_endpoint(policies: &Vec<PolicyHandler>, endpoint: &Endpoint, host_han
             feed_host_handler(host_handler, &endpoint.host, path, &endpoint.methods, policies);
             match path_host.get_mut(path){
                 Some(path_handler) => {
-                    feed_path_host(path_handler, path, &endpoint.methods, policies);
+                    feed_path_host(path_handler, &endpoint.host, &endpoint.methods, policies);
                 }
                 None => {
                     let mut path_handler = PathHandler{hosts: HashMap::new(), action: None};
-                    feed_path_host(&mut path_handler, path, &endpoint.methods, policies);
+                    feed_path_host(&mut path_handler, &endpoint.host, &endpoint.methods, policies);
                     path_host.insert(path.clone(), path_handler);
                 },
             }
