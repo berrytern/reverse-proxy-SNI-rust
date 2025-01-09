@@ -33,7 +33,6 @@ fn expand_var(raw_config: &mut String){
     }
     new.push_str(&raw_config[last_match..]);
     *raw_config = new;
-    println!("raw_config: {:?}", raw_config);
 }
 
 fn validate_https(config: &Config, errors: &mut Vec<String>){

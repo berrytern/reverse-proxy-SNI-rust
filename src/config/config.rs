@@ -1,5 +1,5 @@
-use std::{collections::HashMap, sync::LazyLock};
-use actix_web::{web, HttpRequest};
+use std::{collections::HashMap, hash::Hash, sync::LazyLock};
+use actix_web::{web, HttpRequest, HttpResponseBuilder};
 use regex::Regex;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde::{Serialize, Deserialize};
@@ -64,7 +64,8 @@ pub struct Pipelines {
 #[serde(untagged)]
 pub enum Policies {
     LogPolicy(LogPolicy),
-    ProxyPolicy(ProxyPolicy)
+    ProxyPolicy(ProxyPolicy),
+    HeaderPolicy(HeaderPolicy),
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProxyPolicy {
@@ -171,7 +172,21 @@ impl LogPolicy {
         log::info!("{}", self.extract_params(req));
     }
 }
-
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HeaderPolicy {
+    #[serde(default = "default_uuid")]
+    pub id: String,
+    pub header: HeaderPolicySetup,
+}
+impl HeaderPolicy {
+    pub fn run(
+        &self, req: &mut HttpResponseBuilder
+    ) -> () {
+        for (key, value) in &self.header.action.headers {
+            req.insert_header((key.clone(), value.clone()));
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -215,6 +230,16 @@ pub struct ProxyAction {
     pub timeout: Option<i32>,
     pub service_endpoint: String,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HeaderPolicySetup {
+    pub condition: Option<Condition>,
+    pub action: HeaderAction
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HeaderAction {
+    pub headers: HashMap<String, String>,
+}
 fn default_true() -> bool {
     true
 }
@@ -227,7 +252,6 @@ pub enum Condition {
         condiction: Box<Condition>,
     }
 }
-
 
 impl Condition {
     pub fn proceed(&self, req: HttpRequest) -> bool {

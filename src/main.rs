@@ -1,28 +1,13 @@
 mod config;
 mod infrastructure;
-use config::config::{Config, EndpointType, URLType};
-use infrastructure::yaml::{load_config::load_config, load_handlers::{register_handlers, PolicyHandler, RequestAction}};
+use config::{config::{Config, URLType}, handlers::HostHandler};
+use infrastructure::yaml::{load_config::load_config, load_handlers::{register_handlers, PolicyHandler}};
 use actix_web::{http::StatusCode, web, App, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer};
-use reqwest::header::{
-    HeaderName as ReqwestHeaderName,
-    HeaderValue as ReqwestHeaderValue
-};
-use openssl::{sha::Sha256, ssl::{SslAcceptor, SslContext, SslFiletype, SslMethod}};
+use openssl::ssl::{SslAcceptor, SslContext, SslFiletype, SslMethod};
 use serde::{Serialize, Deserialize};
-use std::{collections::HashMap, path, process::exit, sync::OnceLock};
-use reqwest::Client;
-use futures::{Stream, StreamExt};
-use std::fs;
-use log::error;
+use std::{collections::HashMap, sync::OnceLock};
+use reqwest::{Client, Response};
 use env_logger;
-
-#[derive(Clone, Debug, Deserialize)]
-struct DomainConfig {
-    target: String,
-    ssl: SslConfig,
-    cross_origin_resource_policy: Option<String>,
-    content_security_policy: Option<String>,
-}
 
 #[derive(Clone, Debug, Deserialize)]
 struct SslConfig {
@@ -53,7 +38,25 @@ const DEFAULT_SECURITY_HEADERS: [(&'static str,&'static str); 12] = [
 ];
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
-static HANDLERS: OnceLock<HashMap<String, HashMap<String, RequestAction>>> = OnceLock::new();
+static HANDLERS: OnceLock<HashMap<String, HostHandler>> = OnceLock::new();
+
+fn add_response_headers(gateway_response: &mut HttpResponseBuilder, response: &Response){
+    for (key, value) in response.headers() {
+        match key.as_str() {
+            "connection" | "transfer-encoding" | "user-agent" | "server" | "x-powered-by" => {
+                continue;
+            }
+            key => {
+                if let Ok(value_str) = value.to_str() {
+                    if value_str.bytes().any(|b| matches!(b, b'\0' | b'\r' | b'\n')){
+                        continue;
+                    }
+                    gateway_response.insert_header((key, value.to_str().unwrap()));
+                }
+            }
+        }
+    }
+}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -118,9 +121,9 @@ async fn main() -> std::io::Result<()> {
                     |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>|
                     async move {
                         let host: String = req.connection_info().host().to_string();
-
-                        if let Some(paths) = HANDLERS.get().unwrap().get(&host) {
-                            if let Some(request_action) = paths.get(req.uri().path()) {
+                        let handlers = HANDLERS.get().unwrap();
+                        if let Some(host_handler) = handlers.get(&host) {
+                            if let Some(request_action) = host_handler.paths.get(req.uri().path()) {
                                 if request_action.methods.len() == 0 || request_action.methods.contains(&req.method().to_string()) {
                                     let mut gateway_response = HttpResponseBuilder::new(StatusCode::OK);
                                     let mut gateway_response_body = None;
@@ -145,9 +148,71 @@ async fn main() -> std::io::Result<()> {
                                                             }
                                                         }
                                                         drop(count_value);
-                                                        if let Ok(response) = policy.run(&req, urls[index as usize].as_str(), body.to_vec(), &client).await{
+                                                        if let Ok(response) = policy.run(&req, &format!("{}{}", urls[index as usize].as_str(), &req.uri().path_and_query().map_or("/", |x| x.as_str())), body.to_vec(), &client).await{
                                                             let status_code = actix_web::http::StatusCode::from_u16(response.status().as_u16())
                                                             .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
+                                                            
+                                                            add_response_headers(&mut gateway_response, &response);
+                                                            gateway_response.status(status_code);
+                                                            gateway_response_body = Some(response.bytes_stream());
+                                                        } else {
+                                                            gateway_response.status(StatusCode::BAD_GATEWAY).body("Bad Gateway");
+                                                        }
+                                                    },
+                                                    URLType::String(url) => {
+                                                        if let Ok(response) = policy.run(&req, &format!("{}{}", &url.to_string(), &req.uri().path_and_query().map_or("/", |x| x.as_str())), body.to_vec(), &client).await{
+                                                            let status_code = actix_web::http::StatusCode::from_u16(response.status().as_u16())
+                                                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
+                                                            add_response_headers(&mut gateway_response, &response);
+                                                            gateway_response.status(status_code);
+                                                            gateway_response_body = Some(response.bytes_stream());
+                                                        } else {
+                                                            gateway_response.status(StatusCode::BAD_GATEWAY).body("Bad Gateway");
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            PolicyHandler::Header { policy } => {
+                                                policy.run(&mut gateway_response);
+                                            },
+                                        }
+                                    }
+                                    if let Some(body) = gateway_response_body {
+                                        return gateway_response.streaming(body);
+                                    } else {
+                                        return gateway_response.finish();
+                                    }
+                                }
+                            } else if let Some(request_action) = &host_handler.action {
+                                if request_action.methods.len() == 0 || request_action.methods.contains(&req.method().to_string()) {
+                                    let mut gateway_response = HttpResponseBuilder::new(StatusCode::OK);
+                                    let mut gateway_response_body = None;
+                                    for (name, value) in DEFAULT_SECURITY_HEADERS {
+                                        gateway_response.insert_header((name, value));
+                                    }
+                                    for policy in &request_action.policies {
+                                        match policy {
+                                            PolicyHandler::Log { policy } => {
+                                                policy.run(&req);
+                                            },
+                                            PolicyHandler::Proxy { policy, target, count, size } => {
+                                                match target {
+                                                    URLType::Vec(urls) => {
+                                                        let mut count_value = count.lock().unwrap();
+                                                        let index = *count_value;
+                                                        if urls.len() > 1 {
+                                                            if index < *size {
+                                                                *count_value += 1;
+                                                            } else {
+                                                                *count_value = 0;
+                                                            }
+                                                        }
+                                                        drop(count_value);
+                                                        if let Ok(response) = policy.run(&req, &format!("{}{}", urls[index as usize].as_str(), &req.uri().path_and_query().map_or("/", |x| x.as_str())), body.to_vec(), &client).await{
+                                                            let status_code = actix_web::http::StatusCode::from_u16(response.status().as_u16())
+                                                            .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
+                                                            
+                                                            add_response_headers(&mut gateway_response, &response);
                                                             gateway_response_body = Some(response.bytes_stream());
                                                             gateway_response.status(status_code);
                                                         } else {
@@ -155,9 +220,11 @@ async fn main() -> std::io::Result<()> {
                                                         }
                                                     },
                                                     URLType::String(url) => {
-                                                        if let Ok(response) = policy.run(&req, &url.to_string(), body.to_vec(), &client).await{
+                                                        if let Ok(response) = policy.run(&req, &format!("{}{}", &url.to_string(), &req.uri().path_and_query().map_or("/", |x| x.as_str())), body.to_vec(), &client).await{
                                                             let status_code = actix_web::http::StatusCode::from_u16(response.status().as_u16())
                                                             .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
+                                                            
+                                                            add_response_headers(&mut gateway_response, &response);
                                                             gateway_response_body = Some(response.bytes_stream());
                                                             gateway_response.status(status_code);
                                                         } else {
@@ -165,7 +232,10 @@ async fn main() -> std::io::Result<()> {
                                                         }
                                                     }
                                                 }
-                                            }
+                                            },
+                                            PolicyHandler::Header { policy } => {
+                                                policy.run(&mut gateway_response);
+                                            },
                                         }
                                     }
                                     if let Some(body) = gateway_response_body {
@@ -180,8 +250,6 @@ async fn main() -> std::io::Result<()> {
                                 details: None,
                                 code: None,
                             });
-                        } else if let Some(paths) = HANDLERS.get().unwrap().get("*") {
-                            req.match_pattern()
                         }
                         return HttpResponse::NotFound().json(ErrorResponse {
                             error: "Hostname not configured".into(),
