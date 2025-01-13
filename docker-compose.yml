@@ -1,22 +1,7 @@
 version: "3.8"
 services:
-  qrz-back:
-    build: ./last-running
-    container_name: qrz-back
-    restart: always
-    environment:
-      - KEY_PATH=/etc/ssl/privkey.pem
-      - CERT_PATH=/etc/ssl/fullchain.pem
-    volumes:
-      - /etc/letsencrypt/live/api1.nutespb.com.br/privkey.pem:/etc/ssl/privkey.pem:ro
-      - /etc/letsencrypt/live/api1.nutespb.com.br/fullchain.pem:/etc/ssl/fullchain.pem:ro
-    networks:
-      - qrz-network
-    logging:
-      driver: json-file
-      options:
-        max-size: 100m
   geral-api-gtw:
+    # image: berrytern/reverse-proxy:0.2.0
     build: .
     container_name: geral-api-gtw
     restart: always
@@ -24,26 +9,17 @@ services:
       - 80:80
       - 443:443
     volumes:
-      - /etc/letsencrypt/live/api1.nutespb.com.br/privkey.pem:/etc/ssl/api1.nutespb.com.br/privkey.pem:ro
-      - /etc/letsencrypt/live/api1.nutespb.com.br/fullchain.pem:/etc/ssl/api1.nutespb.com.br/fullchain.pem:ro
-      - /etc/letsencrypt/live/api1.nutespb.com.br/chain.pem:/etc/ssl/api1.nutespb.com.br/chain.pem:ro
-      - ./config.json:/app/config.json:ro
+      - /etc/letsencrypt/live/example.com.br/privkey.pem:/etc/ssl/example.com.br/privkey.pem:ro
+      - /etc/letsencrypt/live/example.com.br/fullchain.pem:/etc/ssl/example.com.br/fullchain.pem:ro
+      - ./config.yaml:/config.yaml:ro
     networks:
-      - qrz-network
-      - ssm-network
-      - aec-back-network
+      - gateway-network
     logging:
       driver: json-file
       options:
         max-size: 100m
 
 networks:
-  qrz-network:
-    name: qrz-network
+  gateway-network:
+    name: gateway-network
     driver: bridge
-  ssm-network:
-    name: ssm-network
-    external: true
-  aec-back-network:
-    name: aec-back-network
-    external: true

@@ -6,30 +6,46 @@ This project, **api-gtw**, is an API gateway designed to provide support for mul
 ## Features
 - **SNI Support**: Dynamically loads SSL certificates for different domains.
 - **Dynamic Routing**: Routes requests based on the `Host` header to the appropriate target service.
-- **Custom Configuration**: Uses a `config.json` file to define SSL credentials and target services.
+- **Custom Configuration**: Uses a `config.yaml` file to define SSL credentials and target services.
 - **Error Handling**: Provides structured JSON responses for errors.
 
 ## Requirements
 - Rust (Edition 2021)
 - A valid SSL certificate for each domain.
-- `config.json` file to define domain configurations.
+- `config.yaml` file to define domain configurations.
 
 ## Installation
-1. Install Rust by following the instructions at [rust-lang.org](https://www.rust-lang.org/tools/install).
-2. Clone this repository:
+### Using Docker(Recommended)
+1. Pull the image from Docker Hub:
    ```bash
-   git clone git@github.com:berrytern/reverse-proxy-SNI-rust.git
-   cd reverse-proxy-SNI-rust
-   ```
-3. Build the project:
-   ```bash
-   cargo build --release
+   docker pull berrytern/reverse-proxy:0.2.0
    ```
 
+2. Create a config.yaml file in your local directory
+3. Run the container:
+   ```bash
+   docker run -d \
+   -p 443:443 \
+   -v $(pwd)/config.yaml:/app/config.yaml \
+   -v /path/to/certificates:/certs \
+   berrytern/reverse-proxy:0.2.0
+   ```
+
+### Building from Source
+   1. Install Rust by following the instructions at [rust-lang.org](https://www.rust-lang.org/tools/install).
+   2. Clone this repository:
+      ```bash
+      git clone git@github.com:berrytern/reverse-proxy-SNI-rust.git
+      cd reverse-proxy-SNI-rust
+      ```
+   3. Build the project:
+      ```bash
+      cargo build --release
+      ```
 ## Usage
-1. Create a `config.json` file in the root directory with your domain configurations.
+1. Create a `config.yaml` file in the root directory with your domain configurations.
     ```bash
-    cp config.json.example config.json
+    cp config.yaml.example config.yaml
     ```
 2. Run the application:
    ```bash
@@ -39,7 +55,7 @@ This project, **api-gtw**, is an API gateway designed to provide support for mul
 
 ## Key Functionality
 ### Forwarding Requests
-Incoming requests are forwarded to the target service defined for the domain in `config.json`. The gateway:
+Incoming requests are forwarded to the target service defined for the domain in `config.yaml`. The gateway:
 - Preserves the HTTP method and headers.
 - Adds an `X-Forwarded-For` header with the client IP.
 
@@ -54,7 +70,7 @@ Errors are returned as JSON objects with the following structure:
 ```
 
 ### Dynamic SSL Configuration
-SSL certificates are loaded dynamically based on the domain using the SNI callback. Ensure that the certificates and private keys are correctly specified in `config.json`.
+SSL certificates are loaded dynamically based on the domain using the SNI callback. Ensure that the certificates and private keys are correctly specified in `config.yaml`.
 
 ## Logging
 The application uses `env_logger` for logging. You can control the logging level using the `RUST_LOG` environment variable. For example:
@@ -63,7 +79,7 @@ RUST_LOG=info cargo run --release
 ```
 
 ## Limitations
-- SSL certificate paths must be correctly configured in `config.json`.
+- SSL certificate paths must be correctly configured in `config.yaml`.
 - Requires valid certificates for all domains.
 
 ## Contributing
