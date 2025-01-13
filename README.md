@@ -15,17 +15,33 @@ This project, **api-gtw**, is an API gateway designed to provide support for mul
 - `config.yaml` file to define domain configurations.
 
 ## Installation
-1. Install Rust by following the instructions at [rust-lang.org](https://www.rust-lang.org/tools/install).
-2. Clone this repository:
+### Using Docker(Recommended)
+1. Pull the image from Docker Hub:
    ```bash
-   git clone git@github.com:berrytern/reverse-proxy-SNI-rust.git
-   cd reverse-proxy-SNI-rust
-   ```
-3. Build the project:
-   ```bash
-   cargo build --release
+   docker pull berrytern/reverse-proxy:0.2.0
    ```
 
+2. Create a config.yaml file in your local directory
+3. Run the container:
+   ```bash
+   docker run -d \
+   -p 443:443 \
+   -v $(pwd)/config.yaml:/app/config.yaml \
+   -v /path/to/certificates:/certs \
+   berrytern/reverse-proxy:0.2.0
+   ```
+
+### Building from Source
+   1. Install Rust by following the instructions at [rust-lang.org](https://www.rust-lang.org/tools/install).
+   2. Clone this repository:
+      ```bash
+      git clone git@github.com:berrytern/reverse-proxy-SNI-rust.git
+      cd reverse-proxy-SNI-rust
+      ```
+   3. Build the project:
+      ```bash
+      cargo build --release
+      ```
 ## Usage
 1. Create a `config.yaml` file in the root directory with your domain configurations.
     ```bash
