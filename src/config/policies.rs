@@ -1,7 +1,7 @@
-use std::{collections::HashMap, sync::LazyLock};
+use std::{collections::HashMap, sync::{Arc, Mutex, LazyLock}, time::Duration};
 use actix_web::{web, HttpRequest, HttpResponseBuilder};
 use regex::Regex;
-use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::{header::{HeaderName, HeaderValue}, StatusCode};
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 
@@ -21,10 +21,37 @@ pub struct ProxyPolicy {
 fn default_uuid() -> String {
     Uuid::new_v4().to_string()
 }
+pub struct ProxyError{
+    error: String,
+    details: String,
+    code: u16,
+
+}
+impl From<reqwest::Error> for ProxyError {
+    fn from(err: reqwest::Error) -> Self {
+        let err = err.without_url();
+        ProxyError{
+            error: err.to_string(),
+            details: err.to_string(),
+            code: err.status().unwrap_or(StatusCode::BAD_GATEWAY).into(),
+        }
+    }
+}
+
 impl ProxyPolicy {
     pub async fn run(
         &self, req: &HttpRequest, url: &str, body: Vec<u8>, client: &web::Data<reqwest::Client>
-    ) -> Result<reqwest::Response, reqwest::Error>{
+    ) -> Result<reqwest::Response, ProxyError>{
+        
+        if let Some(circuit_breaker) = &self.proxy.action.circuit_breaker {
+            if !circuit_breaker.proceed(){
+                return Err(ProxyError{
+                    error: "Circuit Breaker".to_string(),
+                    details: "Circuit Breaker".to_string(),
+                    code: StatusCode::SERVICE_UNAVAILABLE.into(),
+                });
+            }
+        }
         let method = match req.method().as_str() {
             "GET" => reqwest::Method::GET,
             "POST" => reqwest::Method::POST,
@@ -50,7 +77,13 @@ impl ProxyPolicy {
         if let Some(peer_addr) = req.peer_addr(){
             forward_req = forward_req.header("X-Forwarded-For", peer_addr.ip().to_string());
         }
-        forward_req.send().await
+        
+        if let Some(circuit_breaker) = &self.proxy.action.circuit_breaker {
+            let response = forward_req.send().await?;
+            circuit_breaker.compute(response)
+        } else{
+            forward_req.send().await.map_err(|err| err.into())
+        } 
     }
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -155,7 +188,59 @@ pub struct ProxyAction {
     #[serde(default = "default_true")]
     pub secure: bool,
     pub timeout: Option<i32>,
+    pub circuit_breaker: Option<CircuitBreaker>,
     pub service_endpoint: String,
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CircuitBreaker {
+    pub max_requests: Option<i32>,
+    pub timeout: i32,
+    pub error_threshold: Option<i32>,
+    #[serde(default)]
+    count: Arc<Mutex<i32>>,
+    #[serde(default)]
+    error_count: Arc<Mutex<i32>>,
+    #[serde(default)]
+    elapsed_time: Arc<Mutex<Duration>>,
+}
+impl CircuitBreaker {
+    pub fn proceed(&self) -> bool {
+        {
+            let mut elapsed_time = self.elapsed_time.lock().unwrap();
+            if elapsed_time.as_secs() > self.timeout as u64 {
+                *elapsed_time = Duration::new(0, 0);
+                *self.count.lock().unwrap() = 0;
+                *self.error_count.lock().unwrap() = 0;
+                return true;
+            }
+        }
+        if let Some(max_requests) = self.max_requests {
+            {
+                if *self.count.lock().unwrap() >= max_requests {
+                    return false;
+                }
+            }
+        }
+        if let Some(error_threshold) = self.error_threshold {
+            {
+                if error_threshold <= *self.error_count.lock().unwrap() {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+    pub fn compute(&self, response: reqwest::Response) -> Result<reqwest::Response, ProxyError> {
+        if response.status().is_server_error() {
+            {
+                if let Ok(mut error_count) = self.error_count.lock(){
+                    *error_count+=1;
+                }
+            }
+        }
+        *self.count.lock().unwrap()+=1;
+        Ok(response)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
