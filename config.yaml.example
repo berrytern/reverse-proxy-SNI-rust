@@ -1,0 +1,41 @@
+http:
+  port: ${PORT_HTTP:-80}
+  hostname: '0.0.0.0'
+https:
+  port: ${PORT_HTTPS:-443}
+  hostname: '0.0.0.0'
+  tls:
+    "default":
+      key: '/etc/ssl/default/privkey.pem'
+      cert: '/etc/ssl/default/fullchain.pem'
+    "example.com":
+      key: '/etc/ssl/example1.com/privkey.pem'
+      cert: '/etc/ssl/example2.com/fullchain.pem'
+
+api_endpoints:
+  example_front:
+    host: 'example1.com'
+  example_back:
+    host: '*'
+
+service_endpoints:
+  front_service:
+    url: ${FRONT_SERVICE:-https://internal_domain_front:443}
+  back_service:
+    url: ${BACK_SERVICE:-https://internal_domain_back:3000}
+
+
+policies:
+  - log
+  - proxy
+
+
+pipelines:
+  public_loja_pipeline:
+    api_endpoints:
+      - example_front
+    policies:
+      - proxy: &proxy
+          action:
+            secure: false
+            service_endpoint: front_service

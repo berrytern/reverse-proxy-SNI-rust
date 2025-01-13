@@ -171,14 +171,19 @@ async fn main() -> std::io::Result<()> {
     }
     if let Some(https) = &CONFIG.get().unwrap().https {
         let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
-        builder.set_private_key_file(&default_ssl_config.key_path, SslFiletype::PEM).unwrap();
-        builder.set_certificate_chain_file(&default_ssl_config.cert_path).unwrap();
+
 
         // Set SNI callback
         builder.set_servername_callback(move |ssl, _| {
             if let Some(server_name) = ssl.servername(openssl::ssl::NameType::HOST_NAME) {
                 if let Some(https) = CONFIG.get().unwrap().https.as_ref() {
                     if let Some(tls) = https.tls.get(server_name) {
+                        let mut context = SslContext::builder(SslMethod::tls()).unwrap();
+                        context.set_private_key_file(&tls.key, SslFiletype::PEM).unwrap();
+                        context.set_certificate_chain_file(&tls.cert).unwrap();
+
+                        ssl.set_ssl_context(&context.build()).unwrap();
+                    } else if let Some(tls) = https.tls.get("default") {
                         let mut context = SslContext::builder(SslMethod::tls()).unwrap();
                         context.set_private_key_file(&tls.key, SslFiletype::PEM).unwrap();
                         context.set_certificate_chain_file(&tls.cert).unwrap();

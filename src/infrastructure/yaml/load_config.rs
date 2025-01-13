@@ -41,8 +41,8 @@ fn validate_https(config: &Config, errors: &mut Vec<String>){
             errors.push("Invalid gateway configuration: http or https must be defined".into());
         },
         (_, Some(https)) => {
-            if https.tls.get("default").is_none() {
-                errors.push("Invalid HTTPS configuration: default field is required in https.tls".into());
+            if https.tls.is_empty() {
+                errors.push("Invalid HTTPS configuration: need to setup tls field properly".into());
             }
         },
         (_,_) => {}
