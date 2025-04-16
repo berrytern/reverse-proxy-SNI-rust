@@ -175,8 +175,9 @@ async fn main() -> std::io::Result<()> {
 
         // Set SNI callback
         builder.set_servername_callback(move |ssl, _| {
-            if let Some(server_name) = ssl.servername(openssl::ssl::NameType::HOST_NAME) {
-                if let Some(https) = CONFIG.get().unwrap().https.as_ref() {
+            if let Some(https) = CONFIG.get().unwrap().https.as_ref() {
+                
+                if let Some(server_name) = ssl.servername(openssl::ssl::NameType::HOST_NAME) {
                     if let Some(tls) = https.tls.get(server_name) {
                         let mut context = SslContext::builder(SslMethod::tls()).unwrap();
                         context.set_private_key_file(&tls.key, SslFiletype::PEM).unwrap();
@@ -186,13 +187,13 @@ async fn main() -> std::io::Result<()> {
                         return Ok(());
                     }
                 }
-            }
-            if let Some(tls) = https.tls.get("default") {
-                let mut context = SslContext::builder(SslMethod::tls()).unwrap();
-                context.set_private_key_file(&tls.key, SslFiletype::PEM).unwrap();
-                context.set_certificate_chain_file(&tls.cert).unwrap();
+                if let Some(tls) = https.tls.get("default") {
+                    let mut context = SslContext::builder(SslMethod::tls()).unwrap();
+                    context.set_private_key_file(&tls.key, SslFiletype::PEM).unwrap();
+                    context.set_certificate_chain_file(&tls.cert).unwrap();
 
-                ssl.set_ssl_context(&context.build()).unwrap();
+                    ssl.set_ssl_context(&context.build()).unwrap();
+                }
             }
             Ok(())
         });
