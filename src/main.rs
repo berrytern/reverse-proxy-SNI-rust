@@ -183,14 +183,16 @@ async fn main() -> std::io::Result<()> {
                         context.set_certificate_chain_file(&tls.cert).unwrap();
 
                         ssl.set_ssl_context(&context.build()).unwrap();
-                    } else if let Some(tls) = https.tls.get("default") {
-                        let mut context = SslContext::builder(SslMethod::tls()).unwrap();
-                        context.set_private_key_file(&tls.key, SslFiletype::PEM).unwrap();
-                        context.set_certificate_chain_file(&tls.cert).unwrap();
-
-                        ssl.set_ssl_context(&context.build()).unwrap();
+                        return Ok(());
                     }
                 }
+            }
+            if let Some(tls) = https.tls.get("default") {
+                let mut context = SslContext::builder(SslMethod::tls()).unwrap();
+                context.set_private_key_file(&tls.key, SslFiletype::PEM).unwrap();
+                context.set_certificate_chain_file(&tls.cert).unwrap();
+
+                ssl.set_ssl_context(&context.build()).unwrap();
             }
             Ok(())
         });
