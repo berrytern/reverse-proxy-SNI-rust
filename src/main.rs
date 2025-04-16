@@ -148,7 +148,7 @@ async fn main() -> std::io::Result<()> {
     };
 
     let http_client = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::limited(2))
         .danger_accept_invalid_certs(true).build().expect("couldn't initialize http reqwest client");
     let https_client = http_client.clone();
     
@@ -176,7 +176,6 @@ async fn main() -> std::io::Result<()> {
         // Set SNI callback
         builder.set_servername_callback(move |ssl, _| {
             if let Some(https) = CONFIG.get().unwrap().https.as_ref() {
-                
                 if let Some(server_name) = ssl.servername(openssl::ssl::NameType::HOST_NAME) {
                     if let Some(tls) = https.tls.get(server_name) {
                         let mut context = SslContext::builder(SslMethod::tls()).unwrap();
@@ -213,6 +212,7 @@ async fn main() -> std::io::Result<()> {
                             if let Some(path_handler) = handlers.get(&path){
                                 let host: String = req.connection_info().host().to_string();
                                 let method = req.method().to_string();
+
                                 return match (path_handler.hosts.get(&host), &path_handler.action) {
                                     (Some(request_action), _) if request_action.methods.is_empty() || request_action.methods.contains(&method.to_string()) => {
                                         handler_request(request_action, &req, body, &client).await
@@ -228,7 +228,7 @@ async fn main() -> std::io::Result<()> {
                                         })
                                     }
                                 };
-                            }else{
+                            } else {
                                 HttpResponse::Ok().json(ErrorResponse {
                                     error: "path not configured".into(),
                                     details: None,
