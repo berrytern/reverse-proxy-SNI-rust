@@ -141,11 +141,7 @@ async fn main() -> std::io::Result<()> {
     let (hostname_handlers, path_handlers) = register_handlers(&config);
     CONFIG.set(config).expect("Failed to set config");
     HOST_HANDLERS.set(hostname_handlers).expect("Failed to set host handlers");
-    PATH_HANDLERS.set(path_handlers).expect("Failed to set path handlers");
-    let default_ssl_config = SslConfig {
-        key_path: "/etc/ssl/api1.nutespb.com.br/privkey.pem".into(),
-        cert_path: "/etc/ssl/api1.nutespb.com.br/fullchain.pem".into(),
-    };
+    PATH_HANDLERS.set(path_handlers).expect("Failed to set path handlers"); 
 
     let http_client = Client::builder()
         .redirect(reqwest::redirect::Policy::limited(2))
