@@ -17,6 +17,10 @@ api_endpoints:
     host: 'example1.com'
   example_back:
     host: '*'
+    methods: ["GET", "POST", "PATCH", "DELETE"]
+    paths:
+      - "/v1/auth/login"
+      - "/v1/auth/refresh-token"
 
 service_endpoints:
   front_service:
@@ -39,3 +43,7 @@ pipelines:
           action:
             secure: false
             service_endpoint: front_service
+      - header:
+          action:
+            headers:
+              Content-Security-Policy: "default-src 'none';"
