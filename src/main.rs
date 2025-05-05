@@ -110,8 +110,6 @@ async fn handler_request(request_action: &RequestAction, req: &HttpRequest, body
                             add_response_headers(&mut gateway_response, &response);
                             gateway_response.status(status_code);
                             gateway_response_body = Some(response.bytes_stream());
-                        } else {
-                            gateway_response.status(StatusCode::BAD_GATEWAY).body("Bad Gateway");
                         }
                     }
                 }
@@ -129,7 +127,7 @@ async fn handler_request(request_action: &RequestAction, req: &HttpRequest, body
     if let Some(body) = gateway_response_body {
         return gateway_response.streaming(body);
     } else {
-        return gateway_response.finish();
+        return gateway_response.status(StatusCode::BAD_GATEWAY).body("Bad Gateway");;
     }
 }
 
