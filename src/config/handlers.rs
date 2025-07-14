@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use crate::infrastructure::yaml::load_handlers::PolicyHandler;
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct HostnameHandler {
@@ -10,7 +10,6 @@ pub struct HostnameHandler {
 pub struct SpecificHostnameHandler {
     pub action: RequestAction,
 }
-
 
 #[derive(Debug)]
 pub struct PathHandler {

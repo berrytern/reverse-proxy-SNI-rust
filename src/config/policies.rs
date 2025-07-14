@@ -1,8 +1,15 @@
-use std::{collections::HashMap, sync::{Arc, Mutex, LazyLock}, time::Duration};
-use actix_web::{web, HttpRequest, HttpResponseBuilder};
+use actix_web::{HttpRequest, HttpResponseBuilder, web};
 use regex::Regex;
-use reqwest::{header::{HeaderName, HeaderValue}, StatusCode};
-use serde::{Serialize, Deserialize};
+use reqwest::{
+    StatusCode,
+    header::{HeaderName, HeaderValue},
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex},
+    time::Duration,
+};
 use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -21,16 +28,15 @@ pub struct ProxyPolicy {
 fn default_uuid() -> String {
     Uuid::new_v4().to_string()
 }
-pub struct ProxyError{
+pub struct ProxyError {
     error: String,
     details: String,
     code: u16,
-
 }
 impl From<reqwest::Error> for ProxyError {
     fn from(err: reqwest::Error) -> Self {
         let err = err.without_url();
-        ProxyError{
+        ProxyError {
             error: err.to_string(),
             details: err.to_string(),
             code: err.status().unwrap_or(StatusCode::BAD_GATEWAY).into(),
@@ -40,12 +46,15 @@ impl From<reqwest::Error> for ProxyError {
 
 impl ProxyPolicy {
     pub async fn run(
-        &self, req: &HttpRequest, url: &str, body: Vec<u8>, client: &web::Data<reqwest::Client>
-    ) -> Result<reqwest::Response, ProxyError>{
-        
+        &self,
+        req: &HttpRequest,
+        url: &str,
+        body: Vec<u8>,
+        client: &web::Data<reqwest::Client>,
+    ) -> Result<reqwest::Response, ProxyError> {
         if let Some(circuit_breaker) = &self.proxy.action.circuit_breaker {
-            if !circuit_breaker.proceed(){
-                return Err(ProxyError{
+            if !circuit_breaker.proceed() {
+                return Err(ProxyError {
                     error: "Circuit Breaker".to_string(),
                     details: "Circuit Breaker".to_string(),
                     code: StatusCode::SERVICE_UNAVAILABLE.into(),
@@ -64,26 +73,25 @@ impl ProxyPolicy {
             "TRACE" => reqwest::Method::TRACE,
             _ => reqwest::Method::GET,
         };
-        let mut forward_req = client.request(method, url)
-        .body(body);
+        let mut forward_req = client.request(method, url).body(body);
         for (key, value) in req.headers() {
             if key != "host" && key != "connection" && key != "content-length" {
                 let header_name: HeaderName = key.as_str().parse().unwrap();
-                let header_value= HeaderValue::from_str(value.to_str().unwrap())
-                .expect("Failed to convert header value");
+                let header_value = HeaderValue::from_str(value.to_str().unwrap())
+                    .expect("Failed to convert header value");
                 forward_req = forward_req.header(header_name, header_value);
             }
         }
-        if let Some(peer_addr) = req.peer_addr(){
+        if let Some(peer_addr) = req.peer_addr() {
             forward_req = forward_req.header("X-Forwarded-For", peer_addr.ip().to_string());
         }
-        
+
         if let Some(circuit_breaker) = &self.proxy.action.circuit_breaker {
             let response = forward_req.send().await?;
             circuit_breaker.compute(response)
-        } else{
+        } else {
             forward_req.send().await.map_err(|err| err.into())
-        } 
+        }
     }
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -92,40 +100,41 @@ pub struct LogPolicy {
     pub id: String,
     pub log: LogPolicySetup,
 }
-const REG_REQ_PARAMS: LazyLock<Regex> = LazyLock::new(||Regex::new(r#"\$\{([a-z._]+)(?:\[[\'\"]([a-z-]+)[\'\"]\])?\}"#).unwrap());
+const REG_REQ_PARAMS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\$\{([a-z._]+)(?:\[[\'\"]([a-z-]+)[\'\"]\])?\}"#).unwrap());
 impl LogPolicy {
-
     fn extract_params(&self, req: &HttpRequest) -> String {
         let mut new = String::new();
         let mut last_match = 0;
-        for caps in REG_REQ_PARAMS.captures_iter(&self.log.action.message).into_iter() {
+        for caps in REG_REQ_PARAMS
+            .captures_iter(&self.log.action.message)
+            .into_iter()
+        {
             let m = caps.get(0).unwrap();
             new.push_str(&self.log.action.message[last_match..m.start()]);
             match m.as_str() {
                 "req.method" => new.push_str(req.method().as_str()),
                 "req.path" => new.push_str(req.uri().path()),
                 "req.connection.remote_address" => {
-                    if let Some(peer_addr) = req.peer_addr(){
+                    if let Some(peer_addr) = req.peer_addr() {
                         new.push_str(peer_addr.ip().to_string().as_str())
                     }
                     new.push_str("None")
-                },
+                }
                 "req.client_ip" => {
                     new.push_str(req.connection_info().realip_remote_addr().unwrap_or("None"))
-                },
-                "req.http_version" => {
-                    match req.version(){
-                        actix_web::http::Version::HTTP_09 => {new.push_str("HTTP/0.9")},
-                        actix_web::http::Version::HTTP_10 => {new.push_str("HTTP/1.0")},
-                        actix_web::http::Version::HTTP_11 => {new.push_str("HTTP/1.1")},
-                        actix_web::http::Version::HTTP_2 => {new.push_str("HTTP/2.0")},
-                        actix_web::http::Version::HTTP_3 => {new.push_str("HTTP/3.0")},
-                        _ => {new.push_str("None")}
-                    }
+                }
+                "req.http_version" => match req.version() {
+                    actix_web::http::Version::HTTP_09 => new.push_str("HTTP/0.9"),
+                    actix_web::http::Version::HTTP_10 => new.push_str("HTTP/1.0"),
+                    actix_web::http::Version::HTTP_11 => new.push_str("HTTP/1.1"),
+                    actix_web::http::Version::HTTP_2 => new.push_str("HTTP/2.0"),
+                    actix_web::http::Version::HTTP_3 => new.push_str("HTTP/3.0"),
+                    _ => new.push_str("None"),
                 },
                 "req.headers" => {
-                    if let Some(header) = caps.get(1){
-                        if let Some(header) = req.headers().get(header.as_str()){
+                    if let Some(header) = caps.get(1) {
+                        if let Some(header) = req.headers().get(header.as_str()) {
                             new.push_str(header.to_str().unwrap())
                         } else {
                             new.push_str("None")
@@ -133,20 +142,16 @@ impl LogPolicy {
                     } else {
                         new.push_str("None")
                     }
-                    
-                },
+                }
                 "original_url" => new.push_str(req.uri().to_string().as_str()),
-                value => new.push_str(&format!("${{{}}}", value))
+                value => new.push_str(&format!("${{{}}}", value)),
             }
             last_match = m.end();
-        };
+        }
         new
     }
 
-    pub fn run(
-        &self, req: &HttpRequest
-    ) -> () {
-
+    pub fn run(&self, req: &HttpRequest) -> () {
         log::info!("{}", self.extract_params(req));
     }
 }
@@ -157,29 +162,26 @@ pub struct HeaderPolicy {
     pub header: HeaderPolicySetup,
 }
 impl HeaderPolicy {
-    pub fn run(
-        &self, req: &mut HttpResponseBuilder
-    ) -> () {
+    pub fn run(&self, req: &mut HttpResponseBuilder) -> () {
         for (key, value) in &self.header.action.headers {
             req.insert_header((key.clone(), value.clone()));
         }
     }
 }
 
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LogPolicySetup {
     pub condition: Option<Condition>,
-    pub action: LogAction
+    pub action: LogAction,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LogAction{
+pub struct LogAction {
     pub message: String,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProxyPolicySetup {
     pub condition: Option<Condition>,
-    pub action: ProxyAction
+    pub action: ProxyAction,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProxyAction {
@@ -233,12 +235,12 @@ impl CircuitBreaker {
     pub fn compute(&self, response: reqwest::Response) -> Result<reqwest::Response, ProxyError> {
         if response.status().is_server_error() {
             {
-                if let Ok(mut error_count) = self.error_count.lock(){
-                    *error_count+=1;
+                if let Ok(mut error_count) = self.error_count.lock() {
+                    *error_count += 1;
                 }
             }
         }
-        *self.count.lock().unwrap()+=1;
+        *self.count.lock().unwrap() += 1;
         Ok(response)
     }
 }
@@ -246,7 +248,7 @@ impl CircuitBreaker {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HeaderPolicySetup {
     pub condition: Option<Condition>,
-    pub action: HeaderAction
+    pub action: HeaderAction,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HeaderAction {
@@ -258,22 +260,20 @@ fn default_true() -> bool {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case", tag = "name")]
 pub enum Condition {
-    PathExact { path: String },
+    PathExact {
+        path: String,
+    },
     Not {
-        #[serde(flatten)] 
+        #[serde(flatten)]
         condiction: Box<Condition>,
-    }
+    },
 }
 
 impl Condition {
     pub fn proceed(&self, req: &HttpRequest) -> bool {
         match self {
-            Condition::PathExact { path } => {
-                req.uri().path() == path
-            }
-            Condition::Not { condiction } => {
-                !condiction.proceed(req)
-            }
+            Condition::PathExact { path } => req.uri().path() == path,
+            Condition::Not { condiction } => !condiction.proceed(req),
         }
     }
 }

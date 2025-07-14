@@ -1,5 +1,5 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 
 use super::policies::Policies;
 
@@ -10,7 +10,7 @@ pub struct Config {
     pub api_endpoints: HashMap<String, EndpointType>,
     pub service_endpoints: HashMap<String, Service>,
     pub policies: Vec<String>,
-    pub pipelines: HashMap<String, Pipelines>
+    pub pipelines: HashMap<String, Pipelines>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,11 +28,11 @@ pub struct Https {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Tls {
     pub key: String,
-    pub cert: String
+    pub cert: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub struct Endpoint{
+pub struct Endpoint {
     #[serde(default = "default_host")]
     pub host: String,
     #[serde(default = "default_path")]
@@ -55,24 +55,24 @@ pub struct Service {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Pipelines {
     pub api_endpoints: Vec<String>,
-    pub policies: Vec<Policies>
+    pub policies: Vec<Policies>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum EndpointType {
     Endpoint(Endpoint),
-    VecEndpoint(Vec<Endpoint>)
+    VecEndpoint(Vec<Endpoint>),
 }
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PathType {
     String(String),
-    Vec(Vec<String>)
+    Vec(Vec<String>),
 }
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum URLType {
     String(String),
-    Vec(Vec<String>)
+    Vec(Vec<String>),
 }
