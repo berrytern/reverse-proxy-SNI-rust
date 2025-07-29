@@ -1,8 +1,7 @@
 version: "3.8"
 services:
   geral-api-gtw:
-    # image: berrytern/reverse-proxy:0.2.0
-    build: .
+    image: berrytern/reverse-proxy:0.2.1
     container_name: geral-api-gtw
     restart: always
     ports:
