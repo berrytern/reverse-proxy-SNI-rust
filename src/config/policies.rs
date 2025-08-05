@@ -106,10 +106,7 @@ impl LogPolicy {
     fn extract_params(&self, req: &HttpRequest) -> String {
         let mut new = String::new();
         let mut last_match = 0;
-        for caps in REG_REQ_PARAMS
-            .captures_iter(&self.log.action.message)
-            .into_iter()
-        {
+        for caps in REG_REQ_PARAMS.captures_iter(&self.log.action.message) {
             let m = caps.get(0).unwrap();
             new.push_str(&self.log.action.message[last_match..m.start()]);
             match m.as_str() {
@@ -144,14 +141,14 @@ impl LogPolicy {
                     }
                 }
                 "original_url" => new.push_str(req.uri().to_string().as_str()),
-                value => new.push_str(&format!("${{{}}}", value)),
+                value => new.push_str(&format!("${{{value}}}")),
             }
             last_match = m.end();
         }
         new
     }
 
-    pub fn run(&self, req: &HttpRequest) -> () {
+    pub fn run(&self, req: &HttpRequest) {
         log::info!("{}", self.extract_params(req));
     }
 }
@@ -162,7 +159,7 @@ pub struct HeaderPolicy {
     pub header: HeaderPolicySetup,
 }
 impl HeaderPolicy {
-    pub fn run(&self, req: &mut HttpResponseBuilder) -> () {
+    pub fn run(&self, req: &mut HttpResponseBuilder) {
         for (key, value) in &self.header.action.headers {
             req.insert_header((key.clone(), value.clone()));
         }

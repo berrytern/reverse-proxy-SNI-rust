@@ -25,7 +25,7 @@ fn expand_var(raw_config: &mut String) {
                 if let Some(default) = default {
                     new.push_str(default.as_str());
                 } else {
-                    println!("Cannot find environment variable: {}", env_name);
+                    println!("Cannot find environment variable: {env_name}");
                     exit(0)
                 }
             }
@@ -59,27 +59,27 @@ pub fn load_config(file_path: &str) -> Config {
                 exit(0);
             }
             expand_var(&mut data);
-            return match serde_yaml::from_str(&data) {
+            match serde_yaml::from_str(&data) {
                 Ok(fc) => {
                     let mut errors: Vec<String> = vec![];
                     validate_https(&fc, &mut errors);
-                    if errors.len() > 0 {
+                    if !errors.is_empty() {
                         println!("Errors found in configuration file:");
                         for error in errors {
-                            println!("{}", error);
+                            println!("{error}");
                         }
                         exit(0);
                     }
                     fc
                 }
                 Err(err) => {
-                    println!("Invalid YAML or cannot be converted to Config.{}", err);
+                    println!("Invalid YAML or cannot be converted to Config.{err}");
                     exit(0);
                 }
-            };
+            }
         }
         Err(err) => {
-            println!("Cannot open file: {}", err);
+            println!("Cannot open file: {err}");
             exit(0);
         }
     }

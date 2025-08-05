@@ -7,3 +7,11 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-commit]
+-   repo: local
+    hooks:
+      - id: clippy
+        name: clippy
+        entry: bash -c 'cargo clippy --fix --bin "api-gtw"'
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]

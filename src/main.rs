@@ -7,12 +7,11 @@ use config::{
     config::{Config, URLType},
     handlers::{HostnameHandler, PathHandler, RequestAction},
 };
-use env_logger;
 use infrastructure::yaml::{
     load_config::load_config,
     load_handlers::{PolicyHandler, register_handlers},
 };
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use openssl::ssl::{SslAcceptor, SslContext, SslFiletype, SslMethod};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -31,7 +30,7 @@ struct ErrorResponse {
     code: Option<String>,
 }
 
-const DEFAULT_SECURITY_HEADERS: [(&'static str, &'static str); 12] = [
+const DEFAULT_SECURITY_HEADERS: [(&str, &str); 12] = [
     (
         "Content-Security-Policy",
         "default-src 'self';connect-src 'self';base-uri;font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https:;upgrade-insecure-requests",
@@ -95,7 +94,7 @@ async fn handler_request(
                         continue;
                     }
                 }
-                policy.run(&req);
+                policy.run(req);
             }
             PolicyHandler::Proxy {
                 policy,
@@ -122,14 +121,14 @@ async fn handler_request(
                         drop(count_value);
                         match policy
                             .run(
-                                &req,
+                                req,
                                 &format!(
                                     "{}{}",
                                     urls[index as usize].as_str(),
                                     &req.uri().path_and_query().map_or("/", |x| x.as_str())
                                 ),
                                 body.to_vec(),
-                                &client,
+                                client,
                             )
                             .await
                         {
@@ -153,14 +152,14 @@ async fn handler_request(
                     URLType::String(url) => {
                         if let Ok(response) = policy
                             .run(
-                                &req,
+                                req,
                                 &format!(
                                     "{}{}",
                                     &url.to_string(),
                                     &req.uri().path_and_query().map_or("/", |x| x.as_str())
                                 ),
                                 body.to_vec(),
-                                &client,
+                                client,
                             )
                             .await
                         {
@@ -185,11 +184,11 @@ async fn handler_request(
         }
     }
     if let Some(body) = gateway_response_body {
-        return gateway_response.streaming(body);
+        gateway_response.streaming(body)
     } else {
-        return gateway_response
+        gateway_response
             .status(StatusCode::BAD_GATEWAY)
-            .body("Bad Gateway");
+            .body("Bad Gateway")
     }
 }
 
@@ -277,7 +276,7 @@ async fn main() -> std::io::Result<()> {
             "Starting HTTPS server at https://{}:{}",
             https.hostname, https.port
         );
-        let _ = HttpServer::new(move || {
+        HttpServer::new(move || {
             let mut app = App::new();
             let paths = PATH_HANDLERS.get().unwrap().keys();
             app = app
@@ -285,17 +284,17 @@ async fn main() -> std::io::Result<()> {
                 .app_data(web::PayloadConfig::new(10 * 1024 * 1024));
             for path in paths {
                 app = app
-                    .route(&path, web::to(
+                    .route(path, web::to(
                         |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>| {
                         async move {
                             let path = req.match_pattern().unwrap();
                             let handlers = PATH_HANDLERS.get().unwrap();
                             if let Some(path_handler) = handlers.get(&path){
-                                debug!("path {}, handler {:?}", path, path_handler);
+                                debug!("path {path}, handler {path_handler:?}");
                                 let host: String = req.connection_info().host().to_string();
                                 let method = req.method().to_string();
 
-                                return match (path_handler.hosts.get(&host), &path_handler.action) {
+                                match (path_handler.hosts.get(&host), &path_handler.action) {
                                     (Some(request_action), _) if request_action.methods.is_empty() || request_action.methods.contains(&method.to_string()) => {
                                         handler_request(request_action, &req, body, &client).await
                                     },
@@ -309,7 +308,7 @@ async fn main() -> std::io::Result<()> {
                                             code: None,
                                         })
                                     }
-                                };
+                                }
                             } else {
                                 HttpResponse::Ok().json(ErrorResponse {
                                     error: "path not configured".into(),
@@ -342,11 +341,11 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
                     warn!("No handler configured for hostname '{}' | path '{}'", host, req.path());
-                    return HttpResponse::NotFound().json(ErrorResponse {
+                    HttpResponse::NotFound().json(ErrorResponse {
                         error: "Hostname not configured".into(),
                         details: None,
                         code: None,
-                    });
+                    })
                 }
             ))
         }).bind_openssl((https.hostname.clone(), https.port), builder)?.run().await?;

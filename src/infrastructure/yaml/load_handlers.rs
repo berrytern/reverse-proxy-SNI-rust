@@ -18,7 +18,7 @@ fn feed_path_host(
         Some(request_action) => {
             if let Some(endpoint_methods) = methods {
                 endpoint_methods.iter().for_each(|method| {
-                    if !request_action.methods.contains(&method) {
+                    if !request_action.methods.contains(method) {
                         request_action.methods.push(method.clone());
                     }
                 });
@@ -37,7 +37,7 @@ fn feed_path_host(
                     Some(methods) => match &mut path_handler.action {
                         Some(action) => {
                             methods.iter().for_each(|method| {
-                                if !action.methods.contains(&method) {
+                                if !action.methods.contains(method) {
                                     action.methods.push(method.clone());
                                 }
                             });
@@ -79,7 +79,7 @@ fn feed_host_handler(
                 Some(request_action) => {
                     if let Some(endpoint_methods) = methods {
                         for method in endpoint_methods {
-                            if !request_action.methods.contains(&method) {
+                            if !request_action.methods.contains(method) {
                                 request_action.methods.push(method.clone());
                             }
                         }
@@ -103,7 +103,7 @@ fn feed_host_handler(
                 Some(specific_host_handler) => {
                     if let Some(endpoint_methods) = methods {
                         for method in endpoint_methods {
-                            if !specific_host_handler.action.methods.contains(&method) {
+                            if !specific_host_handler.action.methods.contains(method) {
                                 specific_host_handler.action.methods.push(method.clone());
                             }
                         }
@@ -257,15 +257,15 @@ pub fn register_handlers(cf: &Config) -> (HostnameHandler, HashMap<String, PathH
                 match endpoint_vec {
                     EndpointType::VecEndpoint(endpoint_vec) => {
                         for endpoint in endpoint_vec {
-                            process_endpoint(&policies, &endpoint, &mut host_handler, &mut paths);
+                            process_endpoint(&policies, endpoint, &mut host_handler, &mut paths);
                         }
                     }
                     EndpointType::Endpoint(endpoint) => {
-                        process_endpoint(&policies, &endpoint, &mut host_handler, &mut paths);
+                        process_endpoint(&policies, endpoint, &mut host_handler, &mut paths);
                     }
                 }
             }
         }
     }
-    return (host_handler, paths);
+    (host_handler, paths)
 }
