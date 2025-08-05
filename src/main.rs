@@ -12,7 +12,7 @@ use infrastructure::yaml::{
     load_config::load_config,
     load_handlers::{PolicyHandler, register_handlers},
 };
-use log::{info, debug, warn, error};
+use log::{debug, error, info, warn};
 use openssl::ssl::{SslAcceptor, SslContext, SslFiletype, SslMethod};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -201,7 +201,11 @@ async fn main() -> std::io::Result<()> {
     let config = load_config("config.yaml");
     debug!("Registering handlers...");
     let (hostname_handlers, path_handlers) = register_handlers(&config);
-    debug!("Registered {} path handlers and {} host handlers.", path_handlers.len(), hostname_handlers.hosts.len());
+    debug!(
+        "Registered {} path handlers and {} host handlers.",
+        path_handlers.len(),
+        hostname_handlers.hosts.len()
+    );
     CONFIG.set(config).expect("Failed to set config");
     HOST_HANDLERS
         .set(hostname_handlers)
@@ -218,7 +222,10 @@ async fn main() -> std::io::Result<()> {
     let https_client = http_client.clone();
 
     if let Some(http) = &CONFIG.get().unwrap().http {
-        info!("Starting HTTP server at http://{}:{}", http.hostname, http.port);
+        info!(
+            "Starting HTTP server at http://{}:{}",
+            http.hostname, http.port
+        );
         let _ = HttpServer::new(move || {
             App::new()
                 .app_data(web::Data::new(http_client.clone()))
@@ -266,7 +273,10 @@ async fn main() -> std::io::Result<()> {
             }
             Ok(())
         });
-        info!("Starting HTTPS server at https://{}:{}", https.hostname, https.port);
+        info!(
+            "Starting HTTPS server at https://{}:{}",
+            https.hostname, https.port
+        );
         let _ = HttpServer::new(move || {
             let mut app = App::new();
             let paths = PATH_HANDLERS.get().unwrap().keys();
@@ -281,7 +291,7 @@ async fn main() -> std::io::Result<()> {
                             let path = req.match_pattern().unwrap();
                             let handlers = PATH_HANDLERS.get().unwrap();
                             if let Some(path_handler) = handlers.get(&path){
-                                debug!("spath {}, handler {}", path,);
+                                debug!("path {}, handler {:?}", path, path_handler);
                                 let host: String = req.connection_info().host().to_string();
                                 let method = req.method().to_string();
 
@@ -316,18 +326,18 @@ async fn main() -> std::io::Result<()> {
                     let host: String = req.connection_info().host().to_string();
                     let hostname_handlers = HOST_HANDLERS.get().unwrap();
                     if let Some(host_handler) = hostname_handlers.hosts.get(&host) {
-                        if host_handler.action.methods.len() == 0 || host_handler.action.methods.contains(&req.method().to_string()) {
+                        if host_handler.action.methods.is_empty() || host_handler.action.methods.contains(&req.method().to_string()) {
                             return handler_request(&host_handler.action, &req, body, &client).await;
                         }
-                        warn!("Method '{}' not allowed for hostname '{}'", method, host);
+                        warn!("Method '{:?}' not allowed for hostname '{}'", &req.method(), host);
                         return HttpResponse::NotFound().json(ErrorResponse {
                             error: "Method not configured".into(),
                             details: None,
                             code: None,
                         });
                     } else if let Some(request_action) = &hostname_handlers.action {
-                        if request_action.methods.len() == 0 || request_action.methods.contains(&req.method().to_string()) {
-                            debug!("Using default hostname handler for '{}'", host);
+                        if request_action.methods.is_empty() || request_action.methods.contains(&req.method().to_string()) {
+                            debug!("Using default hostname handler for '{host}'");
                             return handler_request(request_action, &req, body, &client).await;
                         }
                     }
