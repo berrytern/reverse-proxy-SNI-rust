@@ -285,14 +285,22 @@ impl CorsPolicy {
                 self.cors.action.origin.clone(),
             ));
         }
-        res.insert_header((
-            actix_web_header::ACCESS_CONTROL_ALLOW_METHODS,
-            self.cors.action.methods.clone(),
-        ));
-        res.insert_header((
-            actix_web_header::ACCESS_CONTROL_ALLOW_HEADERS,
-            self.cors.action.allowed_headers.clone(),
-        ));
+        if &self.cors.action.methods == "*" {
+            res.insert_header((actix_web_header::ACCESS_CONTROL_ALLOW_METHODS, "*"));
+        } else {
+            res.insert_header((
+                actix_web_header::ACCESS_CONTROL_ALLOW_METHODS,
+                self.cors.action.methods.clone(),
+            ));
+        }
+        if &self.cors.action.allowed_headers == "*" {
+            res.insert_header((actix_web_header::ACCESS_CONTROL_ALLOW_HEADERS, "*"));
+        } else {
+            res.insert_header((
+                actix_web_header::ACCESS_CONTROL_ALLOW_HEADERS,
+                self.cors.action.allowed_headers.clone(),
+            ));
+        }
         true
     }
 }
