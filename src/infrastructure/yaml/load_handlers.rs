@@ -1,7 +1,7 @@
 use crate::config::{
     config::{Config, Endpoint, EndpointType, PathType, Service, URLType},
     handlers::{HostnameHandler, PathHandler, RequestAction, SpecificHostnameHandler},
-    policies::{HeaderPolicy, LogPolicy, Policies, ProxyPolicy},
+    policies::{CorsPolicy, HeaderPolicy, LogPolicy, Policies, ProxyPolicy},
 };
 use std::{
     collections::HashMap,
@@ -210,6 +210,9 @@ pub enum PolicyHandler {
     Header {
         policy: HeaderPolicy,
     },
+    Cors {
+        policy: CorsPolicy,
+    },
 }
 
 fn pipeline_to_function(
@@ -238,6 +241,9 @@ fn pipeline_to_function(
             }
             Policies::HeaderPolicy(header_policy) => actions.push(PolicyHandler::Header {
                 policy: header_policy.clone(),
+            }),
+            Policies::CorsPolicy(cors_policy) => actions.push(PolicyHandler::Cors {
+                policy: cors_policy.clone(),
             }),
         }
     }

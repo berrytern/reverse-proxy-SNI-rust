@@ -1,4 +1,5 @@
 mod config;
+mod errors;
 mod infrastructure;
 use actix_web::{
     App, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, http::StatusCode, web,
@@ -7,21 +8,22 @@ use config::{
     config::{Config, URLType},
     handlers::{HostnameHandler, PathHandler, RequestAction},
 };
+use futures_util::StreamExt;
 use infrastructure::yaml::{
     load_config::load_config,
     load_handlers::{PolicyHandler, register_handlers},
 };
-use log::{debug, info, warn};
+use inotify::{Inotify, WatchMask};
+use log::{debug, error, info, warn};
 use openssl::ssl::{SslAcceptor, SslContext, SslFiletype, SslMethod};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, RwLock},
+};
 
-#[derive(Clone, Debug, Deserialize)]
-struct SslConfig {
-    key_path: String,
-    cert_path: String,
-}
+use crate::errors::AppError;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
@@ -51,9 +53,25 @@ const DEFAULT_SECURITY_HEADERS: [(&str, &str); 12] = [
     ("X-Permitted-Cross-Domain-Policies", "none"),
 ];
 
-static CONFIG: OnceLock<Config> = OnceLock::new();
-static HOST_HANDLERS: OnceLock<HostnameHandler> = OnceLock::new();
-static PATH_HANDLERS: OnceLock<HashMap<String, PathHandler>> = OnceLock::new();
+static CONFIG_PATH: &str = "config.yaml";
+static CONFIG: LazyLock<Arc<RwLock<Config>>> = LazyLock::new(|| match load_config(CONFIG_PATH) {
+    Ok(config) => Arc::new(RwLock::new(config)),
+    Err(err) => {
+        panic!("Failed to load config: {err}");
+    }
+});
+static HOST_HANDLERS: LazyLock<Arc<RwLock<HostnameHandler>>> = LazyLock::new(|| {
+    let config_guard = CONFIG.read().unwrap();
+    let (hostname_handlers, _) = register_handlers(&config_guard);
+    debug!("Registered {hostname_handlers:?} host handlers.");
+    Arc::new(RwLock::new(hostname_handlers))
+});
+static PATH_HANDLERS: LazyLock<Arc<RwLock<HashMap<String, PathHandler>>>> = LazyLock::new(|| {
+    let config_guard = CONFIG.read().unwrap();
+    let (_, path_handlers) = register_handlers(&config_guard);
+    debug!("Registered {path_handlers:?} path handlers.");
+    Arc::new(RwLock::new(path_handlers))
+});
 
 fn add_response_headers(gateway_response: &mut HttpResponseBuilder, response: &Response) {
     for (key, value) in response.headers() {
@@ -127,7 +145,7 @@ async fn handler_request(
                                     urls[index as usize].as_str(),
                                     &req.uri().path_and_query().map_or("/", |x| x.as_str())
                                 ),
-                                body.to_vec(),
+                                body.clone(),
                                 client,
                             )
                             .await
@@ -158,7 +176,7 @@ async fn handler_request(
                                     &url.to_string(),
                                     &req.uri().path_and_query().map_or("/", |x| x.as_str())
                                 ),
-                                body.to_vec(),
+                                body.clone(),
                                 client,
                             )
                             .await
@@ -181,6 +199,16 @@ async fn handler_request(
                 }
                 policy.run(&mut gateway_response);
             }
+            PolicyHandler::Cors { policy } => {
+                if let Some(condiction) = &policy.cors.condition {
+                    if !condiction.proceed(req) {
+                        continue;
+                    }
+                }
+                if policy.feed_preflight(req, &mut gateway_response) {
+                    return gateway_response.finish();
+                }
+            }
         }
     }
     if let Some(body) = gateway_response_body {
@@ -193,25 +221,15 @@ async fn handler_request(
 }
 
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), AppError> {
     env_logger::init();
+    let file_path = "config.yaml";
     info!("🚀 Gateway starting up...");
-    debug!("Loading configuration from config.yaml");
-    let config = load_config("config.yaml");
+    debug!("Loading configuration from {file_path}");
+    LazyLock::force(&CONFIG);
     debug!("Registering handlers...");
-    let (hostname_handlers, path_handlers) = register_handlers(&config);
-    debug!(
-        "Registered {} path handlers and {} host handlers.",
-        path_handlers.len(),
-        hostname_handlers.hosts.len()
-    );
-    CONFIG.set(config).expect("Failed to set config");
-    HOST_HANDLERS
-        .set(hostname_handlers)
-        .expect("Failed to set host handlers");
-    PATH_HANDLERS
-        .set(path_handlers)
-        .expect("Failed to set path handlers");
+    LazyLock::force(&HOST_HANDLERS);
+    LazyLock::force(&PATH_HANDLERS);
 
     let http_client = Client::builder()
         .redirect(reqwest::redirect::Policy::limited(2))
@@ -219,136 +237,217 @@ async fn main() -> std::io::Result<()> {
         .build()
         .expect("couldn't initialize http reqwest client");
     let https_client = http_client.clone();
-
-    if let Some(http) = &CONFIG.get().unwrap().http {
-        info!(
-            "Starting HTTP server at http://{}:{}",
-            http.hostname, http.port
-        );
-        let _ = HttpServer::new(move || {
-            App::new()
-                .app_data(web::Data::new(http_client.clone()))
-                .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
-                .default_service(web::to(
-                    |_: HttpRequest, _: web::Bytes, _: web::Data<reqwest::Client>| async move {
-                        HttpResponse::NotFound().json(ErrorResponse {
-                            error: "Domain not configured".into(),
-                            details: None,
-                            code: None,
-                        })
+    let _ = tokio::spawn(async move {
+        let inotify = Inotify::init().expect("Failed to initialize inotify");
+        match inotify.watches().add(file_path, WatchMask::CLOSE_WRITE) {
+            Ok(_) => {
+                info!("Watching file: {file_path}");
+                let mut buffer = [0; 1024];
+                match inotify.into_event_stream(&mut buffer) {
+                    Ok(mut stream) => loop {
+                        match stream.next().await {
+                            Some(Ok(_)) => {
+                                match load_config(file_path) {
+                                    Ok(new_config) => {
+                                        debug!(
+                                            "success on load config: {file_path}: {new_config:?}"
+                                        );
+                                        match CONFIG.try_write() {
+                                            Ok(mut config) => {
+                                                *config = new_config;
+                                                (
+                                                    *HOST_HANDLERS.write().unwrap(),
+                                                    *PATH_HANDLERS.write().unwrap(),
+                                                ) = register_handlers(&config);
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "Failed to acquire write lock on CONFIG: {e}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        error!("Failed to load config: {file_path}: {err}");
+                                    }
+                                };
+                            }
+                            None => {}
+                            Some(Err(error)) => {
+                                error!("Failed to read event: {error}");
+                            }
+                        }
                     },
-                ))
-        })
-        .bind((http.hostname.clone(), http.port))?
-        .run();
-    }
-    if let Some(https) = &CONFIG.get().unwrap().https {
-        let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
-        debug!("Configuring SNI for HTTPS server.");
-        // Set SNI callback
-        builder.set_servername_callback(move |ssl, _| {
-            if let Some(https) = CONFIG.get().unwrap().https.as_ref() {
-                if let Some(server_name) = ssl.servername(openssl::ssl::NameType::HOST_NAME) {
-                    if let Some(tls) = https.tls.get(server_name) {
-                        let mut context = SslContext::builder(SslMethod::tls()).unwrap();
-                        context
-                            .set_private_key_file(&tls.key, SslFiletype::PEM)
-                            .unwrap();
-                        context.set_certificate_chain_file(&tls.cert).unwrap();
-
-                        ssl.set_ssl_context(&context.build()).unwrap();
-                        return Ok(());
+                    Err(e) => {
+                        error!("Failed to read events from inotify stream: {e}");
                     }
                 }
-                if let Some(tls) = https.tls.get("default") {
-                    let mut context = SslContext::builder(SslMethod::tls()).unwrap();
-                    context
-                        .set_private_key_file(&tls.key, SslFiletype::PEM)
-                        .unwrap();
-                    context.set_certificate_chain_file(&tls.cert).unwrap();
-
-                    ssl.set_ssl_context(&context.build()).unwrap();
-                }
             }
-            Ok(())
-        });
-        info!(
-            "Starting HTTPS server at https://{}:{}",
-            https.hostname, https.port
-        );
-        HttpServer::new(move || {
-            let mut app = App::new();
-            let paths = PATH_HANDLERS.get().unwrap().keys();
-            app = app
-                .app_data(web::Data::new(https_client.clone()))
-                .app_data(web::PayloadConfig::new(10 * 1024 * 1024));
-            for path in paths {
-                app = app
-                    .route(path, web::to(
-                        |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>| {
-                        async move {
-                            let path = req.match_pattern().unwrap();
-                            let handlers = PATH_HANDLERS.get().unwrap();
-                            if let Some(path_handler) = handlers.get(&path){
-                                debug!("path {path}, handler {path_handler:?}");
-                                let host: String = req.connection_info().host().to_string();
-                                let method = req.method().to_string();
+            Err(e) => {
+                error!("Failed to watch file: {file_path}: {e}");
+            }
+        };
+    });
+    if let Ok(config) = CONFIG.read() {
+        if let Some(http) = &config.http {
+            info!(
+                "Starting HTTP server at http://{}:{}",
+                http.hostname, http.port
+            );
+            let _ = HttpServer::new(move || {
+                App::new()
+                    .app_data(web::Data::new(http_client.clone()))
+                    .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
+                    .default_service(web::to(
+                        |_: HttpRequest, _: web::Bytes, _: web::Data<reqwest::Client>| async move {
+                            HttpResponse::NotFound().json(ErrorResponse {
+                                error: "Domain not configured".into(),
+                                details: None,
+                                code: None,
+                            })
+                        },
+                    ))
+            })
+            .bind((http.hostname.clone(), http.port))?
+            .run();
+        }
+    }
+    if let Ok(config) = CONFIG.read() {
+        if let Some(https) = config.https.clone() {
+            drop(config);
+            let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
+            debug!("Configuring SNI for HTTPS server.");
+            // Set SNI callback
+            builder.set_servername_callback(move |ssl, _| {
+                match CONFIG.read() {
+                    Ok(config) => {
+                        if let Some(https) = &config.https {
+                            if let Some(server_name) =
+                                ssl.servername(openssl::ssl::NameType::HOST_NAME)
+                            {
+                                if let Some(tls) = https.tls.get(server_name) {
+                                    let mut context =
+                                        SslContext::builder(SslMethod::tls()).unwrap();
+                                    context
+                                        .set_private_key_file(&tls.key, SslFiletype::PEM)
+                                        .unwrap();
+                                    context.set_certificate_chain_file(&tls.cert).unwrap();
 
-                                match (path_handler.hosts.get(&host), &path_handler.action) {
-                                    (Some(request_action), _) if request_action.methods.is_empty() || request_action.methods.contains(&method.to_string()) => {
-                                        handler_request(request_action, &req, body, &client).await
-                                    },
-                                    (None, Some(request_action)) if request_action.methods.is_empty() || request_action.methods.contains(&method.to_string()) => {
-                                        handler_request(request_action, &req, body, &client).await
-                                    },
-                                    (_, _) => {
-                                        HttpResponse::Ok().json(ErrorResponse {
-                                            error: "path not configured".into(),
+                                    ssl.set_ssl_context(&context.build()).unwrap();
+                                    return Ok(());
+                                }
+                            }
+                            if let Some(tls) = https.tls.get("default") {
+                                let mut context = SslContext::builder(SslMethod::tls()).unwrap();
+                                context
+                                    .set_private_key_file(&tls.key, SslFiletype::PEM)
+                                    .unwrap();
+                                context.set_certificate_chain_file(&tls.cert).unwrap();
+
+                                ssl.set_ssl_context(&context.build()).unwrap();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to read config for SNI: {e}");
+                    }
+                }
+                Ok(())
+            });
+            info!(
+                "Starting HTTPS server at https://{}:{}",
+                https.hostname, https.port
+            );
+            HttpServer::new(move || {
+                let mut app = App::new();
+                if let Ok(path_handlers) = PATH_HANDLERS.read() {
+                    let paths = path_handlers.keys();
+                    app = app
+                        .app_data(web::Data::new(https_client.clone()))
+                        .app_data(web::PayloadConfig::new(10 * 1024 * 1024));
+                    for path in paths {
+                        app = app
+                            .route(path, web::to(
+                                |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>| {
+                                async move {
+                                    let path = req.match_pattern().unwrap();
+                                    if let Ok(handlers) = PATH_HANDLERS.read() {
+                                        if let Some(path_handler) = handlers.get(&path){
+                                            debug!("path {path}, handler {path_handler:?}");
+                                            let host: String = req.connection_info().host().to_string();
+                                            let method = req.method().to_string();
+
+                                            match (path_handler.hosts.get(&host), &path_handler.action) {
+                                                (Some(request_action), _) if request_action.methods.is_empty() || request_action.methods.contains(&method) => {
+                                                    handler_request(request_action, &req, body, &client).await
+                                                },
+                                                (None, Some(request_action)) if request_action.methods.is_empty() || request_action.methods.contains(&method) => {
+                                                    handler_request(request_action, &req, body, &client).await
+                                                },
+                                                (_, _) => {
+                                                    HttpResponse::Ok().json(ErrorResponse {
+                                                        error: "path not configured".into(),
+                                                        details: None,
+                                                        code: None,
+                                                    })
+                                                }
+                                            }
+                                        } else {
+                                            HttpResponse::Ok().json(ErrorResponse {
+                                                error: "path not configured".into(),
+                                                details: None,
+                                                code: None,
+                                            })
+                                        }
+                                    } else {
+                                        HttpResponse::InternalServerError().json(ErrorResponse {
+                                            error: "Path handler could not be acquired".into(),
                                             details: None,
                                             code: None,
                                         })
                                     }
                                 }
-                            } else {
-                                HttpResponse::Ok().json(ErrorResponse {
-                                    error: "path not configured".into(),
+                            }));
+                    }
+                }
+                app.default_service(web::to(
+                    |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>|
+                    async move {
+                        let host: String = req.connection_info().host().to_string();
+                        if let Ok(hostname_handlers) = HOST_HANDLERS.read() {
+                            if let Some(host_handler) = hostname_handlers.hosts.get(&host) {
+                                if host_handler.action.methods.is_empty() || host_handler.action.methods.contains(&req.method().to_string()) {
+                                    return handler_request(&host_handler.action, &req, body, &client).await;
+                                }
+                                warn!("Method '{:?}' not allowed for hostname '{}'", &req.method(), host);
+                                return HttpResponse::NotFound().json(ErrorResponse {
+                                    error: "Method not configured".into(),
                                     details: None,
                                     code: None,
-                                })
+                                });
+                            } else if let Some(request_action) = &hostname_handlers.action {
+                                if request_action.methods.is_empty() || request_action.methods.contains(&req.method().to_string()) {
+                                    debug!("Using default hostname handler for '{host}'");
+                                    return handler_request(request_action, &req, body, &client).await;
+                                }
                             }
-                        }
-                    }));
-            }
-            app.default_service(web::to(
-                |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>|
-                async move {
-                    let host: String = req.connection_info().host().to_string();
-                    let hostname_handlers = HOST_HANDLERS.get().unwrap();
-                    if let Some(host_handler) = hostname_handlers.hosts.get(&host) {
-                        if host_handler.action.methods.is_empty() || host_handler.action.methods.contains(&req.method().to_string()) {
-                            return handler_request(&host_handler.action, &req, body, &client).await;
-                        }
-                        warn!("Method '{:?}' not allowed for hostname '{}'", &req.method(), host);
-                        return HttpResponse::NotFound().json(ErrorResponse {
-                            error: "Method not configured".into(),
-                            details: None,
-                            code: None,
-                        });
-                    } else if let Some(request_action) = &hostname_handlers.action {
-                        if request_action.methods.is_empty() || request_action.methods.contains(&req.method().to_string()) {
-                            debug!("Using default hostname handler for '{host}'");
-                            return handler_request(request_action, &req, body, &client).await;
+                            warn!("No handler configured for hostname '{}' | path '{}'", host, req.path());
+                            HttpResponse::NotFound().json(ErrorResponse {
+                                error: "Hostname not configured".into(),
+                                details: None,
+                                code: None,
+                            })
+                        } else {
+                            HttpResponse::InternalServerError().json(ErrorResponse {
+                                error: "Host handler could not be acquired".into(),
+                                details: None,
+                                code: None,
+                            })
                         }
                     }
-                    warn!("No handler configured for hostname '{}' | path '{}'", host, req.path());
-                    HttpResponse::NotFound().json(ErrorResponse {
-                        error: "Hostname not configured".into(),
-                        details: None,
-                        code: None,
-                    })
-                }
-            ))
-        }).bind_openssl((https.hostname.clone(), https.port), builder)?.run().await?;
+                ))
+            }).bind_openssl((https.hostname.clone(), https.port), builder)?.run().await?;
+        }
     }
     Ok(())
 }

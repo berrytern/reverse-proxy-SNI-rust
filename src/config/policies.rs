@@ -1,4 +1,4 @@
-use actix_web::{HttpRequest, HttpResponseBuilder, web};
+use actix_web::{HttpRequest, HttpResponseBuilder, http::header as actix_web_header, web};
 use regex::Regex;
 use reqwest::{
     StatusCode,
@@ -18,6 +18,7 @@ pub enum Policies {
     LogPolicy(LogPolicy),
     ProxyPolicy(ProxyPolicy),
     HeaderPolicy(HeaderPolicy),
+    CorsPolicy(CorsPolicy),
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProxyPolicy {
@@ -49,7 +50,7 @@ impl ProxyPolicy {
         &self,
         req: &HttpRequest,
         url: &str,
-        body: Vec<u8>,
+        body: web::Bytes,
         client: &web::Data<reqwest::Client>,
     ) -> Result<reqwest::Response, ProxyError> {
         if let Some(circuit_breaker) = &self.proxy.action.circuit_breaker {
@@ -253,6 +254,47 @@ pub struct HeaderAction {
 }
 fn default_true() -> bool {
     true
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CorsAction {
+    pub origin: String,
+    pub methods: String,
+    pub allowed_headers: String,
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CorsPolicySetup {
+    pub condition: Option<Condition>,
+    pub action: CorsAction,
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CorsPolicy {
+    #[serde(default = "default_uuid")]
+    pub id: String,
+    pub cors: CorsPolicySetup,
+}
+impl CorsPolicy {
+    pub fn feed_preflight(&self, req: &HttpRequest, res: &mut HttpResponseBuilder) -> bool {
+        if req.method() != actix_web::http::Method::OPTIONS {
+            return false;
+        }
+        if &self.cors.action.origin == "*" {
+            res.insert_header((actix_web_header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"));
+        } else {
+            res.insert_header((
+                actix_web_header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                self.cors.action.origin.clone(),
+            ));
+        }
+        res.insert_header((
+            actix_web_header::ACCESS_CONTROL_ALLOW_METHODS,
+            self.cors.action.methods.clone(),
+        ));
+        res.insert_header((
+            actix_web_header::ACCESS_CONTROL_ALLOW_HEADERS,
+            self.cors.action.allowed_headers.clone(),
+        ));
+        true
+    }
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case", tag = "name")]

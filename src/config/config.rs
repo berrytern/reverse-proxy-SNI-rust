@@ -13,25 +13,25 @@ pub struct Config {
     pub pipelines: HashMap<String, Pipelines>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Http {
     pub port: u16,
     pub hostname: String,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Https {
     pub port: u16,
     pub hostname: String,
     pub tls: HashMap<String, Tls>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tls {
     pub key: String,
     pub cert: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Endpoint {
     #[serde(default = "default_host")]
     pub host: String,
@@ -64,13 +64,13 @@ pub enum EndpointType {
     Endpoint(Endpoint),
     VecEndpoint(Vec<Endpoint>),
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PathType {
     String(String),
     Vec(Vec<String>),
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum URLType {
     String(String),
