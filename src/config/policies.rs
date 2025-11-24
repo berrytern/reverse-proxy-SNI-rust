@@ -7,8 +7,11 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    sync::{Arc, LazyLock, Mutex},
-    time::Duration,
+    sync::{Arc, LazyLock},
+};
+use std::{
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
@@ -193,54 +196,57 @@ pub struct ProxyAction {
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CircuitBreaker {
-    pub max_requests: Option<i32>,
-    pub timeout: i32,
-    pub error_threshold: Option<i32>,
+    pub max_requests: Option<usize>,
+    pub timeout: usize,
+    pub error_threshold: Option<usize>,
     #[serde(default)]
-    count: Arc<Mutex<i32>>,
+    count: Arc<AtomicUsize>,
     #[serde(default)]
-    error_count: Arc<Mutex<i32>>,
-    #[serde(default)]
-    elapsed_time: Arc<Mutex<Duration>>,
+    error_count: Arc<AtomicUsize>,
+    #[serde(skip, default = "default_last_reset")]
+    last_reset: Arc<AtomicU64>,
 }
 impl CircuitBreaker {
     pub fn proceed(&self) -> bool {
         {
-            let mut elapsed_time = self.elapsed_time.lock().unwrap();
-            if elapsed_time.as_secs() > self.timeout as u64 {
-                *elapsed_time = Duration::new(0, 0);
-                *self.count.lock().unwrap() = 0;
-                *self.error_count.lock().unwrap() = 0;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            if now >= self.last_reset.load(Ordering::Relaxed) + self.timeout as u64 {
+                self.last_reset.store(now, Ordering::Relaxed);
+                self.count.store(0, Ordering::Relaxed);
+                self.error_count.store(0, Ordering::Relaxed);
                 return true;
             }
         }
         if let Some(max_requests) = self.max_requests {
-            {
-                if *self.count.lock().unwrap() >= max_requests {
-                    return false;
-                }
+            if self.count.load(Ordering::Relaxed) >= max_requests {
+                return false;
             }
         }
         if let Some(error_threshold) = self.error_threshold {
-            {
-                if error_threshold <= *self.error_count.lock().unwrap() {
-                    return false;
-                }
+            if error_threshold <= self.error_count.load(Ordering::Relaxed) {
+                return false;
             }
         }
         true
     }
     pub fn compute(&self, response: reqwest::Response) -> Result<reqwest::Response, ProxyError> {
         if response.status().is_server_error() {
-            {
-                if let Ok(mut error_count) = self.error_count.lock() {
-                    *error_count += 1;
-                }
-            }
+            self.error_count.fetch_add(1, Ordering::Relaxed);
         }
-        *self.count.lock().unwrap() += 1;
+        self.count.fetch_add(1, Ordering::Relaxed);
         Ok(response)
     }
+}
+fn default_last_reset() -> Arc<AtomicU64> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    Arc::new(AtomicU64::new(now))
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
