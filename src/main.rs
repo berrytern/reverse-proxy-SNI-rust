@@ -5,6 +5,7 @@ use crate::errors::AppError;
 use actix_web::{
     App, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, http::StatusCode, web,
 };
+use arc_swap::ArcSwap;
 use config::{
     config::{Config, URLType},
     handlers::{HostnameHandler, PathHandler, RequestAction},
@@ -15,7 +16,8 @@ use infrastructure::yaml::{
     load_handlers::{PolicyHandler, register_handlers},
 };
 use inotify::{Inotify, WatchMask};
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
+use matchit::Router;
 use openssl::ssl::{SslAcceptor, SslContext, SslFiletype, SslMethod};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -271,6 +273,81 @@ fn build_ssl_cache(config: &Config) -> HashMap<String, SslContext> {
     cache
 }
 
+pub type RouteTable = Router<PathHandler>;
+
+static DYNAMIC_ROUTER: LazyLock<Arc<ArcSwap<RouteTable>>> =
+    LazyLock::new(|| Arc::new(ArcSwap::from_pointee(Router::new())));
+
+fn reload_routes() {
+    let mut new_router = Router::new();
+
+    // 1. Iterate your config and build the tree
+    // Assuming config.routes is a HashMap<Path, Action>
+    if let Ok(path_handlers) = &PATH_HANDLERS.read() {
+        for (path, handler) in path_handlers.iter() {
+            // matchit supports syntax like "/users/:id"
+            if let Err(e) = new_router.insert(path, handler.clone()) {
+                error!("Failed to insert route '{path}': {e}");
+            }
+        }
+    }
+
+    // 2. ATOMIC SWAP
+    // This is a single CPU instruction pointer change.
+    // It is effectively instant. No request is blocked.
+    DYNAMIC_ROUTER.store(Arc::new(new_router));
+
+    info!("Routes hot-swapped successfully!");
+}
+
+async fn dynamic_router_handler(
+    req: HttpRequest,
+    body: web::Payload,
+    client: web::Data<reqwest::Client>,
+) -> HttpResponse {
+    let path = req.path();
+
+    let router = DYNAMIC_ROUTER.load();
+
+    // 2. LOOKUP (Radix Tree Match)
+    match router.at(path) {
+        Ok(match_result) => {
+            let path_handler = match_result.value;
+
+            let host: String = req.connection_info().host().to_string();
+            let method = req.method().to_string();
+
+            match (path_handler.hosts.get(&host), &path_handler.action) {
+                (Some(request_action), _)
+                    if request_action.methods.is_empty()
+                        || request_action.methods.contains(&method) =>
+                {
+                    handler_request(request_action, &req, body, &client).await
+                }
+                (None, Some(request_action))
+                    if request_action.methods.is_empty()
+                        || request_action.methods.contains(&method) =>
+                {
+                    handler_request(request_action, &req, body, &client).await
+                }
+                (_, _) => HttpResponse::Ok().json(ErrorResponse {
+                    error: "path not configured".into(),
+                    details: None,
+                    code: None,
+                }),
+            }
+        }
+        Err(_) => {
+            // 4. 404 Not Found
+            HttpResponse::NotFound().json(ErrorResponse {
+                error: "Path not found".into(),
+                details: None,
+                code: Some("404".into()),
+            })
+        }
+    }
+}
+
 #[actix_web::main]
 async fn main() -> Result<(), AppError> {
     env_logger::init();
@@ -281,7 +358,7 @@ async fn main() -> Result<(), AppError> {
     debug!("Registering handlers...");
     LazyLock::force(&HOST_HANDLERS);
     LazyLock::force(&PATH_HANDLERS);
-
+    reload_routes();
     let http_client = Client::builder()
         .redirect(reqwest::redirect::Policy::limited(2))
         .danger_accept_invalid_certs(true)
@@ -310,6 +387,7 @@ async fn main() -> Result<(), AppError> {
                                                     *HOST_HANDLERS.write().unwrap(),
                                                     *PATH_HANDLERS.write().unwrap(),
                                                 ) = register_handlers(&config);
+                                                reload_routes();
                                                 let new_ssl_cache = build_ssl_cache(&config);
                                                 match SSL_CACHE.write() {
                                                     Ok(mut cache) => *cache = new_ssl_cache,
@@ -404,93 +482,15 @@ async fn main() -> Result<(), AppError> {
             );
             HttpServer::new(move || {
                 let mut app = App::new();
-                if let Ok(path_handlers) = PATH_HANDLERS.read() {
-                    let paths = path_handlers.keys();
-                    app = app
-                        .app_data(web::Data::new(https_client.clone()))
-                        .app_data(web::PayloadConfig::new(10 * 1024 * 1024));
-                    for path in paths {
-                        app = app
-                            .route(path, web::to(
-                                |req: HttpRequest, body: web::Payload, client: web::Data<reqwest::Client>| {
-                                async move {
-                                    let path = req.match_pattern().unwrap();
-                                    if let Ok(handlers) = PATH_HANDLERS.read() {
-                                        if let Some(path_handler) = handlers.get(&path){
-                                            debug!("path {path}, handler {path_handler:?}");
-                                            let host: String = req.connection_info().host().to_string();
-                                            let method = req.method().to_string();
+                app = app
+                    .app_data(web::Data::new(https_client.clone()))
+                    .app_data(web::PayloadConfig::new(10 * 1024 * 1024));
 
-                                            match (path_handler.hosts.get(&host), &path_handler.action) {
-                                                (Some(request_action), _) if request_action.methods.is_empty() || request_action.methods.contains(&method) => {
-                                                    handler_request(request_action, &req, body, &client).await
-                                                },
-                                                (None, Some(request_action)) if request_action.methods.is_empty() || request_action.methods.contains(&method) => {
-                                                    handler_request(request_action, &req, body, &client).await
-                                                },
-                                                (_, _) => {
-                                                    HttpResponse::Ok().json(ErrorResponse {
-                                                        error: "path not configured".into(),
-                                                        details: None,
-                                                        code: None,
-                                                    })
-                                                }
-                                            }
-                                        } else {
-                                            HttpResponse::Ok().json(ErrorResponse {
-                                                error: "path not configured".into(),
-                                                details: None,
-                                                code: None,
-                                            })
-                                        }
-                                    } else {
-                                        HttpResponse::InternalServerError().json(ErrorResponse {
-                                            error: "Path handler could not be acquired".into(),
-                                            details: None,
-                                            code: None,
-                                        })
-                                    }
-                                }
-                            }));
-                    }
-                }
-                app.default_service(web::to(
-                    |req: HttpRequest, body: web::Payload, client: web::Data<reqwest::Client>|
-                    async move {
-                        let host: String = req.connection_info().host().to_string();
-                        if let Ok(hostname_handlers) = HOST_HANDLERS.read() {
-                            if let Some(host_handler) = hostname_handlers.hosts.get(&host) {
-                                if host_handler.action.methods.is_empty() || host_handler.action.methods.contains(&req.method().to_string()) {
-                                    return handler_request(&host_handler.action, &req, body, &client).await;
-                                }
-                                warn!("Method '{:?}' not allowed for hostname '{}'", &req.method(), host);
-                                return HttpResponse::NotFound().json(ErrorResponse {
-                                    error: "Method not configured".into(),
-                                    details: None,
-                                    code: None,
-                                });
-                            } else if let Some(request_action) = &hostname_handlers.action {
-                                if request_action.methods.is_empty() || request_action.methods.contains(&req.method().to_string()) {
-                                    debug!("Using default hostname handler for '{host}'");
-                                    return handler_request(request_action, &req, body, &client).await;
-                                }
-                            }
-                            warn!("No handler configured for hostname '{}' | path '{}'", host, req.path());
-                            HttpResponse::NotFound().json(ErrorResponse {
-                                error: "Hostname not configured".into(),
-                                details: None,
-                                code: None,
-                            })
-                        } else {
-                            HttpResponse::InternalServerError().json(ErrorResponse {
-                                error: "Host handler could not be acquired".into(),
-                                details: None,
-                                code: None,
-                            })
-                        }
-                    }
-                ))
-            }).bind_openssl((https.hostname.clone(), https.port), builder)?.run().await?;
+                app.default_service(web::to(dynamic_router_handler))
+            })
+            .bind_openssl((https.hostname.clone(), https.port), builder)?
+            .run()
+            .await?;
         }
     }
     Ok(())
