@@ -1,6 +1,7 @@
 mod config;
 mod errors;
 mod infrastructure;
+use crate::errors::AppError;
 use actix_web::{
     App, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer, http::StatusCode, web,
 };
@@ -22,8 +23,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, LazyLock, RwLock},
 };
-
-use crate::errors::AppError;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
@@ -96,7 +96,7 @@ fn add_response_headers(gateway_response: &mut HttpResponseBuilder, response: &R
 async fn handler_request(
     request_action: &RequestAction,
     req: &HttpRequest,
-    body: web::Bytes,
+    mut body: web::Payload,
     client: &web::Data<reqwest::Client>,
 ) -> HttpResponse {
     let mut gateway_response = HttpResponseBuilder::new(StatusCode::OK);
@@ -104,6 +104,21 @@ async fn handler_request(
     for (name, value) in DEFAULT_SECURITY_HEADERS {
         gateway_response.insert_header((name, value));
     }
+    let (tx, rx) = mpsc::channel::<Result<web::Bytes, std::io::Error>>(10);
+    actix_web::rt::spawn(async move {
+        while let Some(chunk) = body.next().await {
+            let item = chunk.map_err(std::io::Error::other);
+            if tx.send(item).await.is_err() {
+                break;
+            }
+        }
+    });
+    let stream = futures_util::stream::unfold(rx, |mut receiver| async move {
+        receiver.recv().await.map(|item| (item, receiver))
+    });
+
+    // 4. Prepare Body Cursor
+    let mut body_cursor = Some(reqwest::Body::wrap_stream(stream));
     for policy in &request_action.policies {
         match policy {
             PolicyHandler::Log { policy } => {
@@ -125,68 +140,73 @@ async fn handler_request(
                         continue;
                     }
                 }
-                match target {
-                    URLType::Vec(urls) => {
-                        let mut count_value = count.lock().unwrap();
-                        let index = *count_value;
-                        if urls.len() > 1 {
-                            if index < *size {
-                                *count_value += 1;
-                            } else {
-                                *count_value = 0;
+
+                if let Some(request_body) = body_cursor.take() {
+                    match target {
+                        URLType::Vec(urls) => {
+                            let mut count_value = count.lock().unwrap();
+                            let index = *count_value;
+                            if urls.len() > 1 {
+                                if index < *size {
+                                    *count_value += 1;
+                                } else {
+                                    *count_value = 0;
+                                }
+                            }
+                            drop(count_value);
+                            match policy
+                                .run(
+                                    req,
+                                    &format!(
+                                        "{}{}",
+                                        urls[index as usize].as_str(),
+                                        &req.uri().path_and_query().map_or("/", |x| x.as_str())
+                                    ),
+                                    request_body,
+                                    client,
+                                )
+                                .await
+                            {
+                                Ok(response) => {
+                                    let status_code = actix_web::http::StatusCode::from_u16(
+                                        response.status().as_u16(),
+                                    )
+                                    .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
+
+                                    add_response_headers(&mut gateway_response, &response);
+                                    gateway_response.status(status_code);
+                                    gateway_response_body = Some(response.bytes_stream());
+                                }
+                                _ => {
+                                    gateway_response
+                                        .status(StatusCode::BAD_GATEWAY)
+                                        .body("Bad Gateway");
+                                }
                             }
                         }
-                        drop(count_value);
-                        match policy
-                            .run(
-                                req,
-                                &format!(
-                                    "{}{}",
-                                    urls[index as usize].as_str(),
-                                    &req.uri().path_and_query().map_or("/", |x| x.as_str())
-                                ),
-                                body.clone(),
-                                client,
-                            )
-                            .await
-                        {
-                            Ok(response) => {
+                        URLType::String(url) => {
+                            // 4. Convert the Receiver into a Stream that Reqwest accepts
+                            if let Ok(response) = policy
+                                .run(
+                                    req,
+                                    &format!(
+                                        "{}{}",
+                                        &url.to_string(),
+                                        &req.uri().path_and_query().map_or("/", |x| x.as_str())
+                                    ),
+                                    request_body,
+                                    client,
+                                )
+                                .await
+                            {
                                 let status_code = actix_web::http::StatusCode::from_u16(
                                     response.status().as_u16(),
                                 )
                                 .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
-
                                 add_response_headers(&mut gateway_response, &response);
                                 gateway_response.status(status_code);
                                 gateway_response_body = Some(response.bytes_stream());
                             }
-                            _ => {
-                                gateway_response
-                                    .status(StatusCode::BAD_GATEWAY)
-                                    .body("Bad Gateway");
-                            }
-                        }
-                    }
-                    URLType::String(url) => {
-                        if let Ok(response) = policy
-                            .run(
-                                req,
-                                &format!(
-                                    "{}{}",
-                                    &url.to_string(),
-                                    &req.uri().path_and_query().map_or("/", |x| x.as_str())
-                                ),
-                                body.clone(),
-                                client,
-                            )
-                            .await
-                        {
-                            let status_code =
-                                actix_web::http::StatusCode::from_u16(response.status().as_u16())
-                                    .unwrap_or(actix_web::http::StatusCode::INTERNAL_SERVER_ERROR);
-                            add_response_headers(&mut gateway_response, &response);
-                            gateway_response.status(status_code);
-                            gateway_response_body = Some(response.bytes_stream());
                         }
                     }
                 }
@@ -392,7 +412,7 @@ async fn main() -> Result<(), AppError> {
                     for path in paths {
                         app = app
                             .route(path, web::to(
-                                |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>| {
+                                |req: HttpRequest, body: web::Payload, client: web::Data<reqwest::Client>| {
                                 async move {
                                     let path = req.match_pattern().unwrap();
                                     if let Ok(handlers) = PATH_HANDLERS.read() {
@@ -435,7 +455,7 @@ async fn main() -> Result<(), AppError> {
                     }
                 }
                 app.default_service(web::to(
-                    |req: HttpRequest, body: web::Bytes, client: web::Data<reqwest::Client>|
+                    |req: HttpRequest, body: web::Payload, client: web::Data<reqwest::Client>|
                     async move {
                         let host: String = req.connection_info().host().to_string();
                         if let Ok(hostname_handlers) = HOST_HANDLERS.read() {

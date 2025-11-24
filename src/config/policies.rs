@@ -50,7 +50,7 @@ impl ProxyPolicy {
         &self,
         req: &HttpRequest,
         url: &str,
-        body: web::Bytes,
+        body: reqwest::Body,
         client: &web::Data<reqwest::Client>,
     ) -> Result<reqwest::Response, ProxyError> {
         if let Some(circuit_breaker) = &self.proxy.action.circuit_breaker {
