@@ -5,7 +5,7 @@ use crate::config::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, atomic::AtomicUsize},
 };
 
 fn feed_path_host(
@@ -204,8 +204,7 @@ pub enum PolicyHandler {
     Proxy {
         policy: ProxyPolicy,
         target: URLType,
-        count: Arc<Mutex<u8>>,
-        size: u8,
+        count: Arc<AtomicUsize>,
     },
     Header {
         policy: HeaderPolicy,
@@ -234,8 +233,7 @@ fn pipeline_to_function(
                     actions.push(PolicyHandler::Proxy {
                         policy: proxy_policy.clone(),
                         target: service.url.clone(),
-                        count: Arc::new(Mutex::new(0)),
-                        size: size as u8,
+                        count: Arc::new(AtomicUsize::new(0)),
                     });
                 }
             }

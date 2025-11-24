@@ -135,7 +135,6 @@ async fn handler_request(
                 policy,
                 target,
                 count,
-                size,
             } => {
                 if let Some(condiction) = &policy.proxy.condition {
                     if !condiction.proceed(req) {
@@ -146,22 +145,15 @@ async fn handler_request(
                 if let Some(request_body) = body_cursor.take() {
                     match target {
                         URLType::Vec(urls) => {
-                            let mut count_value = count.lock().unwrap();
-                            let index = *count_value;
-                            if urls.len() > 1 {
-                                if index < *size {
-                                    *count_value += 1;
-                                } else {
-                                    *count_value = 0;
-                                }
-                            }
-                            drop(count_value);
+                            let raw_index =
+                                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let index = raw_index % urls.len();
                             match policy
                                 .run(
                                     req,
                                     &format!(
                                         "{}{}",
-                                        urls[index as usize].as_str(),
+                                        urls[index].as_str(),
                                         &req.uri().path_and_query().map_or("/", |x| x.as_str())
                                     ),
                                     request_body,
@@ -242,11 +234,11 @@ async fn handler_request(
     }
 }
 
-static SSL_CACHE: LazyLock<Arc<RwLock<HashMap<String, SslContext>>>> = LazyLock::new(|| {
+static SSL_CACHE: LazyLock<Arc<ArcSwap<HashMap<String, SslContext>>>> = LazyLock::new(|| {
     let config_guard = CONFIG.read().unwrap();
     let cache = build_ssl_cache(&config_guard);
     debug!("Loaded {} SSL contexts", cache.len());
-    Arc::new(RwLock::new(cache))
+    Arc::new(ArcSwap::from_pointee(cache))
 });
 
 fn build_ssl_cache(config: &Config) -> HashMap<String, SslContext> {
@@ -281,20 +273,14 @@ static DYNAMIC_ROUTER: LazyLock<Arc<ArcSwap<RouteTable>>> =
 fn reload_routes() {
     let mut new_router = Router::new();
 
-    // 1. Iterate your config and build the tree
-    // Assuming config.routes is a HashMap<Path, Action>
     if let Ok(path_handlers) = &PATH_HANDLERS.read() {
         for (path, handler) in path_handlers.iter() {
-            // matchit supports syntax like "/users/:id"
             if let Err(e) = new_router.insert(path, handler.clone()) {
                 error!("Failed to insert route '{path}': {e}");
             }
         }
     }
 
-    // 2. ATOMIC SWAP
-    // This is a single CPU instruction pointer change.
-    // It is effectively instant. No request is blocked.
     DYNAMIC_ROUTER.store(Arc::new(new_router));
 
     info!("Routes hot-swapped successfully!");
@@ -389,12 +375,7 @@ async fn main() -> Result<(), AppError> {
                                                 ) = register_handlers(&config);
                                                 reload_routes();
                                                 let new_ssl_cache = build_ssl_cache(&config);
-                                                match SSL_CACHE.write() {
-                                                    Ok(mut cache) => *cache = new_ssl_cache,
-                                                    Err(e) => error!(
-                                                        "Failed to acquire write lock on SSL_CACHE: {e}"
-                                                    ),
-                                                }
+                                                SSL_CACHE.store(Arc::new(new_ssl_cache));
                                                 info!("Configuration and SSL contexts reloaded.");
                                             }
                                             Err(e) => {
@@ -456,23 +437,22 @@ async fn main() -> Result<(), AppError> {
             debug!("Configuring SNI for HTTPS server.");
             // Set SNI callback
             builder.set_servername_callback(move |ssl, _| {
-                if let Ok(cache) = SSL_CACHE.read() {
-                    let server_name = ssl.servername(openssl::ssl::NameType::HOST_NAME);
+                let cache = SSL_CACHE.load();
+                let server_name = ssl.servername(openssl::ssl::NameType::HOST_NAME);
 
-                    // 1. Try to find the specific domain
-                    if let Some(name) = server_name {
-                        if let Some(context) = cache.get(name) {
-                            // This is fast (Arc clone internally in OpenSSL)
-                            ssl.set_ssl_context(context).unwrap();
-                            return Ok(());
-                        }
-                    }
-
-                    // 2. Fallback to "default"
-                    if let Some(context) = cache.get("default") {
+                // 1. Try to find the specific domain
+                if let Some(name) = server_name {
+                    if let Some(context) = cache.get(name) {
+                        // This is fast (Arc clone internally in OpenSSL)
                         ssl.set_ssl_context(context).unwrap();
                         return Ok(());
                     }
+                }
+
+                // 2. Fallback to "default"
+                if let Some(context) = cache.get("default") {
+                    ssl.set_ssl_context(context).unwrap();
+                    return Ok(());
                 }
                 Ok(())
             });
