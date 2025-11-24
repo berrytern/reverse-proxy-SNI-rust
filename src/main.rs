@@ -220,6 +220,37 @@ async fn handler_request(
     }
 }
 
+static SSL_CACHE: LazyLock<Arc<RwLock<HashMap<String, SslContext>>>> = LazyLock::new(|| {
+    let config_guard = CONFIG.read().unwrap();
+    let cache = build_ssl_cache(&config_guard);
+    debug!("Loaded {} SSL contexts", cache.len());
+    Arc::new(RwLock::new(cache))
+});
+
+fn build_ssl_cache(config: &Config) -> HashMap<String, SslContext> {
+    let mut cache = HashMap::new();
+
+    if let Some(https_config) = &config.https {
+        for (domain, tls_config) in &https_config.tls {
+            let mut context_builder = SslContext::builder(SslMethod::tls()).unwrap();
+
+            // We load the files HERE, not in the callback
+            if let Err(e) = context_builder.set_private_key_file(&tls_config.key, SslFiletype::PEM)
+            {
+                error!("Failed to load key for {domain}: {e}");
+                continue;
+            }
+            if let Err(e) = context_builder.set_certificate_chain_file(&tls_config.cert) {
+                error!("Failed to load cert for {domain}: {e}");
+                continue;
+            }
+
+            cache.insert(domain.clone(), context_builder.build());
+        }
+    }
+    cache
+}
+
 #[actix_web::main]
 async fn main() -> Result<(), AppError> {
     env_logger::init();
@@ -259,6 +290,14 @@ async fn main() -> Result<(), AppError> {
                                                     *HOST_HANDLERS.write().unwrap(),
                                                     *PATH_HANDLERS.write().unwrap(),
                                                 ) = register_handlers(&config);
+                                                let new_ssl_cache = build_ssl_cache(&config);
+                                                match SSL_CACHE.write() {
+                                                    Ok(mut cache) => *cache = new_ssl_cache,
+                                                    Err(e) => error!(
+                                                        "Failed to acquire write lock on SSL_CACHE: {e}"
+                                                    ),
+                                                }
+                                                info!("Configuration and SSL contexts reloaded.");
                                             }
                                             Err(e) => {
                                                 error!(
@@ -319,37 +358,22 @@ async fn main() -> Result<(), AppError> {
             debug!("Configuring SNI for HTTPS server.");
             // Set SNI callback
             builder.set_servername_callback(move |ssl, _| {
-                match CONFIG.read() {
-                    Ok(config) => {
-                        if let Some(https) = &config.https {
-                            if let Some(server_name) =
-                                ssl.servername(openssl::ssl::NameType::HOST_NAME)
-                            {
-                                if let Some(tls) = https.tls.get(server_name) {
-                                    let mut context =
-                                        SslContext::builder(SslMethod::tls()).unwrap();
-                                    context
-                                        .set_private_key_file(&tls.key, SslFiletype::PEM)
-                                        .unwrap();
-                                    context.set_certificate_chain_file(&tls.cert).unwrap();
+                if let Ok(cache) = SSL_CACHE.read() {
+                    let server_name = ssl.servername(openssl::ssl::NameType::HOST_NAME);
 
-                                    ssl.set_ssl_context(&context.build()).unwrap();
-                                    return Ok(());
-                                }
-                            }
-                            if let Some(tls) = https.tls.get("default") {
-                                let mut context = SslContext::builder(SslMethod::tls()).unwrap();
-                                context
-                                    .set_private_key_file(&tls.key, SslFiletype::PEM)
-                                    .unwrap();
-                                context.set_certificate_chain_file(&tls.cert).unwrap();
-
-                                ssl.set_ssl_context(&context.build()).unwrap();
-                            }
+                    // 1. Try to find the specific domain
+                    if let Some(name) = server_name {
+                        if let Some(context) = cache.get(name) {
+                            // This is fast (Arc clone internally in OpenSSL)
+                            ssl.set_ssl_context(context).unwrap();
+                            return Ok(());
                         }
                     }
-                    Err(e) => {
-                        error!("Failed to read config for SNI: {e}");
+
+                    // 2. Fallback to "default"
+                    if let Some(context) = cache.get("default") {
+                        ssl.set_ssl_context(context).unwrap();
+                        return Ok(());
                     }
                 }
                 Ok(())
