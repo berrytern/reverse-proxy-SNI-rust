@@ -19,7 +19,7 @@ COPY ./src/ /app/src
 RUN cargo build --release && strip target/release/api-gtw
 
 # use a plain alpine image, the alpine version needs to match the builder
-FROM alpine:3.20
+FROM alpine:3.23.2
 # if needed, install additional dependencies here
 RUN apk add --no-cache libgcc openssl-dev
 # copy the binary into the final image
